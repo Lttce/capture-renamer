@@ -1,3 +1,6 @@
+// MockFS を使った Watcher のユニットテスト。
+// MockFS は map で仮想的なファイルシステムを模擬し、実ファイルI/Oなしで
+// 各シナリオ（新ファイル検出、衝突回避、prefix切替 etc.）を検証する。
 package main
 
 import (
@@ -7,18 +10,21 @@ import (
 	"testing"
 )
 
+// ---- MockFS ----
+
 type mockDirEntry struct {
 	name  string
 	isDir bool
 }
 
-func (m mockDirEntry) Name() string           { return m.name }
-func (m mockDirEntry) IsDir() bool             { return m.isDir }
-func (m mockDirEntry) Type() os.FileMode       { return 0 }
-func (m mockDirEntry) Info() (os.FileInfo, error) { return nil, nil }
+func (m mockDirEntry) Name() string               { return m.name }
+func (m mockDirEntry) IsDir() bool                 { return m.isDir }
+func (m mockDirEntry) Type() os.FileMode           { return 0 }
+func (m mockDirEntry) Info() (os.FileInfo, error)  { return nil, nil }
 
+// MockFS は map[string]bool でファイル名→存在有無を管理する簡易ファイルシステム。
 type MockFS struct {
-	files   map[string]bool // path -> exists
+	files   map[string]bool
 	renames []struct{ old, new string }
 }
 
@@ -73,6 +79,9 @@ func (m *MockFS) IsNotExist(err error) bool {
 	return os.IsNotExist(err)
 }
 
+// ---- テストケース ----
+
+// 起動時スキャンが既存ファイルを既知リストに登録することを確認。
 func TestScanExisting(t *testing.T) {
 	fs := NewMockFS()
 	fs.addFile("existing_01.png")
@@ -93,6 +102,7 @@ func TestScanExisting(t *testing.T) {
 	}
 }
 
+// 新ファイルが {prefix}_{seq}.{ext} にリネームされることを確認。
 func TestPollRenamesNewFile(t *testing.T) {
 	fs := NewMockFS()
 	state := NewState("test")
@@ -116,6 +126,7 @@ func TestPollRenamesNewFile(t *testing.T) {
 	}
 }
 
+// 既知ファイルがポーリングで再処理されないことを確認。
 func TestPollSkipsKnownFiles(t *testing.T) {
 	fs := NewMockFS()
 	state := NewState("test")
@@ -133,6 +144,7 @@ func TestPollSkipsKnownFiles(t *testing.T) {
 	}
 }
 
+// prefix切替でカウンタがリセットされることを確認。
 func TestPrefixSwitchResetsCounter(t *testing.T) {
 	fs := NewMockFS()
 	state := NewState("a")
@@ -151,11 +163,13 @@ func TestPrefixSwitchResetsCounter(t *testing.T) {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 
+	// b_01 になっていればカウンタが1に戻った証拠（b_02 ではない）
 	if !fs.files["b_01.png"] {
 		t.Error("expected b_01.png to exist, counter should reset to 1")
 	}
 }
 
+// UniqueNewName が衝突時に (1) サフィックスを付けることを確認。
 func TestUniqueNewNameOnCollision(t *testing.T) {
 	fs := NewMockFS()
 	fs.addFile("test_01.png")
@@ -171,12 +185,13 @@ func TestUniqueNewNameOnCollision(t *testing.T) {
 	}
 }
 
+// リネーム先ファイル名が衝突した場合、ユニーク化されてリネームされることを確認。
 func TestPollWithCollision(t *testing.T) {
 	fs := NewMockFS()
 	state := NewState("test")
 	w := NewWatcher(fs, state, ".")
 
-	fs.addFile("test_01.png") // pre-existing, blocks first seq
+	fs.addFile("test_01.png") // 事前に存在 → 連番01をブロック
 	state.MarkKnown("test_01.png")
 	fs.addFile("shot.png")
 
@@ -207,6 +222,7 @@ func TestPollWithCollision(t *testing.T) {
 	t.Logf("collision resolved: shot.png -> %s", renamed)
 }
 
+// 複数ファイルが同時に現れた場合、連番が正しく発行されることを確認。
 func TestPollReturnsCounts(t *testing.T) {
 	fs := NewMockFS()
 	state := NewState("test")
