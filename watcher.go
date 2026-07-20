@@ -12,14 +12,6 @@ import (
 	"time"
 )
 
-// ---- 設定定数 ----
-
-const (
-	SaveFolder    = "."               // 監視対象フォルダ（起動引数からの読み込みは未実装）
-	InitialPrefix = "item"            // 起動時の初期prefix
-	PollInterval  = 300 * time.Millisecond // ポーリング間隔
-)
-
 // ---- Watcher ----
 
 // Watcher はフォルダ監視と自動リネームを担当する。
