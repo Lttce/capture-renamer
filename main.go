@@ -8,22 +8,35 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 )
 
 func main() {
-	w := NewWatcher(SaveFolder, InitialPrefix)
+	folder := flag.String("folder", ".", "監視フォルダのパス")
+	prefix := flag.String("prefix", "item", "初期prefix")
+	interval := flag.Int("interval", 300, "ポーリング間隔(ms)")
+	flag.Parse()
+
+	// 100ms未満のポーリング間隔はビジーループ相当の負荷になるため禁止
+	if *interval < 100 {
+		log.Fatalf("interval must be at least 100ms, got %dms", *interval)
+	}
+
+	w := NewWatcher(*folder, *prefix)
 
 	// 起動時スキャン: 既存ファイルをリネーム対象から除外する
 	if err := w.ScanExisting(); err != nil {
 		log.Fatalf("scan existing files: %v", err)
 	}
 
-	fmt.Printf("Monitoring %s (prefix=%q, interval=%v)\n", SaveFolder, InitialPrefix, PollInterval)
+	dur := time.Duration(*interval) * time.Millisecond
+	fmt.Printf("Monitoring %s (prefix=%q, interval=%v)\n", *folder, *prefix, dur)
 	fmt.Println("Enter new prefix + Enter to switch, Ctrl+C to exit")
 
 	// Ctrl+C のハンドリング
@@ -31,7 +44,7 @@ func main() {
 	signal.Notify(sig, os.Interrupt)
 
 	// Watcher を別 goroutine で起動（ポーリング監視ループ）
-	go w.Start(PollInterval)
+	go w.Start(dur)
 
 	// stdin から prefix 入力を受け付ける goroutine
 	scanner := bufio.NewScanner(os.Stdin)
