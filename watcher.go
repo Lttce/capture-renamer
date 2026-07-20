@@ -1,102 +1,143 @@
-// フォルダ監視と自動リネームのロジック。
-// ファイル操作は FileSystem interface 経由で行うため、本番（OSFileSystem）と
-// テスト（MockFS）を差し替え可能。
 package main
 
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
+const (
+	SaveFolder    = "."
+	InitialPrefix = "item"
+	PollInterval  = 300 * time.Millisecond
+)
+
 type Watcher struct {
-	fs     FileSystem
-	state  *State
-	folder string
-	stop   chan struct{}
+	mu         sync.Mutex
+	folder     string
+	prefix     string
+	counter    int
+	knownFiles map[string]bool
+	stop       chan struct{}
 }
 
-func NewWatcher(fs FileSystem, state *State, folder string) *Watcher {
+func NewWatcher(folder, initialPrefix string) *Watcher {
 	return &Watcher{
-		fs:     fs,
-		state:  state,
-		folder: folder,
-		stop:   make(chan struct{}),
+		folder:     folder,
+		prefix:     initialPrefix,
+		counter:    1,
+		knownFiles: make(map[string]bool),
+		stop:       make(chan struct{}),
 	}
 }
 
-// Stop は監視ループに停止を通知する。
 func (w *Watcher) Stop() {
 	close(w.stop)
 }
 
-// ScanExisting は起動時に既存ファイルを全て既知リストに追加する。
-// これにより、既にあるファイルをリネーム対象から除外する。
+func (w *Watcher) SetPrefix(p string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.prefix = p
+	w.counter = 1
+}
+
+func (w *Watcher) getPrefix() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.prefix
+}
+
+func (w *Watcher) nextSequence() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := w.counter
+	w.counter++
+	return n
+}
+
+func (w *Watcher) isKnown(name string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.knownFiles[name]
+}
+
+func (w *Watcher) markKnown(name string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.knownFiles[name] = true
+}
+
+func uniqueNewName(base string) string {
+	if _, err := os.Stat(base); os.IsNotExist(err) {
+		return base
+	}
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("%s (%d)%s", stem, i, ext)
+		if _, err := os.Stat(name); os.IsNotExist(err) {
+			return name
+		}
+	}
+}
+
 func (w *Watcher) ScanExisting() error {
-	entries, err := w.fs.ReadDir(w.folder)
+	entries, err := os.ReadDir(w.folder)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
-			w.state.MarkKnown(e.Name())
+			w.markKnown(e.Name())
 		}
 	}
 	return nil
 }
 
-// Poll は一度フォルダをスキャンし、新ファイルをリネームする。
-// リネーム後の名前は {prefix}_{連番}_{元のファイル名} 形式（拡張子保持）。
-// 既に同名ファイルが存在する場合は UniqueNewName で衝突を回避する。
-// 戻り値はリネームしたファイル数とエラー。
 func (w *Watcher) Poll() (int, error) {
-	entries, err := w.fs.ReadDir(w.folder)
+	entries, err := os.ReadDir(w.folder)
 	if err != nil {
 		return 0, err
 	}
 
-	// 既知リストにない = 新ファイル
 	var newFiles []string
 	for _, e := range entries {
-		if !e.IsDir() && !w.state.IsKnown(e.Name()) {
+		if !e.IsDir() && !w.isKnown(e.Name()) {
 			newFiles = append(newFiles, e.Name())
 		}
 	}
 
 	renamed := 0
 	for _, name := range newFiles {
-		seq := w.state.NextSequence()
+		seq := w.nextSequence()
 		oldPath := filepath.Join(w.folder, name)
 
 		ext := filepath.Ext(name)
 		stem := strings.TrimSuffix(name, ext)
-		prefix := w.state.Prefix()
-		newName := fmt.Sprintf("%s_%02d_%s%s", prefix, seq, stem, ext)
-		newPath := filepath.Join(w.folder, newName)
+		p := w.getPrefix()
+		newName := fmt.Sprintf("%s_%02d_%s%s", p, seq, stem, ext)
+		newPath := uniqueNewName(filepath.Join(w.folder, newName))
 
-		newPath = UniqueNewName(w.fs, newPath)
-
-		if err := w.fs.Rename(oldPath, newPath); err != nil {
-			// リネーム失敗（書き込み中など）でも元ファイルを既知扱いにし、
-			// 毎ポーリングで再試行しないようにする。
+		if err := os.Rename(oldPath, newPath); err != nil {
 			log.Printf("rename failed: %s -> %s: %v", oldPath, newPath, err)
-			w.state.MarkKnown(name)
+			w.markKnown(name)
 			continue
 		}
 
 		log.Printf("renamed: %s -> %s", name, filepath.Base(newPath))
-		w.state.MarkKnown(name)
-		w.state.MarkKnown(filepath.Base(newPath))
+		w.markKnown(name)
+		w.markKnown(filepath.Base(newPath))
 		renamed++
 	}
 
 	return renamed, nil
 }
 
-// Start は interval 間隔で Poll を呼び続ける監視ループ。
-// Stop() が呼ばれるまでブロックする。
 func (w *Watcher) Start(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
