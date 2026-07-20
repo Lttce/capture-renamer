@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -47,7 +48,7 @@ func (w *Watcher) ScanExisting() error {
 }
 
 // Poll は一度フォルダをスキャンし、新ファイルをリネームする。
-// リネーム後の名前は {prefix}_{02d}.{ext} 形式。
+// リネーム後の名前は {prefix}_{連番}_{元のファイル名} 形式（拡張子保持）。
 // 既に同名ファイルが存在する場合は UniqueNewName で衝突を回避する。
 // 戻り値はリネームしたファイル数とエラー。
 func (w *Watcher) Poll() (int, error) {
@@ -70,8 +71,9 @@ func (w *Watcher) Poll() (int, error) {
 		oldPath := filepath.Join(w.folder, name)
 
 		ext := filepath.Ext(name)
+		stem := strings.TrimSuffix(name, ext)
 		prefix := w.state.Prefix()
-		newName := fmt.Sprintf("%s_%02d%s", prefix, seq, ext)
+		newName := fmt.Sprintf("%s_%02d_%s%s", prefix, seq, stem, ext)
 		newPath := filepath.Join(w.folder, newName)
 
 		newPath = UniqueNewName(w.fs, newPath)

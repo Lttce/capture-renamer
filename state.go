@@ -8,7 +8,7 @@ import "sync"
 type State struct {
 	mu         sync.Mutex
 	prefix     string          // 現在のリネームprefix
-	counter    int             // 次に発行する連番
+	counter    int             // 次に発行する連番（ファイル名には使わないが内部管理用）
 	knownFiles map[string]bool // 既に存在する／処理済みのファイル名
 }
 
@@ -27,7 +27,7 @@ func (s *State) Prefix() string {
 	return s.prefix
 }
 
-// prefixを変更し、同時に連番を1にリセットする。
+// prefixを変更し、連番を1にリセットする。
 func (s *State) SetPrefix(p string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

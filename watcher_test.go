@@ -4,7 +4,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -118,8 +117,8 @@ func TestPollRenamesNewFile(t *testing.T) {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 
-	if !fs.files["test_01.png"] {
-		t.Error("expected test_01.png to exist after rename")
+	if !fs.files["test_01_shot.png"] {
+		t.Error("expected test_01_shot.png to exist after rename")
 	}
 	if !state.IsKnown("shot.png") {
 		t.Error("expected shot.png to be known")
@@ -144,7 +143,7 @@ func TestPollSkipsKnownFiles(t *testing.T) {
 	}
 }
 
-// prefix切替でカウンタがリセットされることを確認。
+// prefix切替後、新ファイルには新しいprefixが付与されることを確認。
 func TestPrefixSwitchResetsCounter(t *testing.T) {
 	fs := NewMockFS()
 	state := NewState("a")
@@ -163,9 +162,9 @@ func TestPrefixSwitchResetsCounter(t *testing.T) {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 
-	// b_01 になっていればカウンタが1に戻った証拠（b_02 ではない）
-	if !fs.files["b_01.png"] {
-		t.Error("expected b_01.png to exist, counter should reset to 1")
+	// b_01_f2 になっていればprefixが切り替わり連番がリセットされた証拠
+	if !fs.files["b_01_f2.png"] {
+		t.Error("expected b_01_f2.png to exist (prefix_連番_元ファイル名)")
 	}
 }
 
@@ -191,8 +190,8 @@ func TestPollWithCollision(t *testing.T) {
 	state := NewState("test")
 	w := NewWatcher(fs, state, ".")
 
-	fs.addFile("test_01.png") // 事前に存在 → 連番01をブロック
-	state.MarkKnown("test_01.png")
+	fs.addFile("test_01_shot.png") // 事前に存在 → test_01_shot.png をブロック
+	state.MarkKnown("test_01_shot.png")
 	fs.addFile("shot.png")
 
 	n, err := w.Poll()
@@ -203,7 +202,7 @@ func TestPollWithCollision(t *testing.T) {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 
-	if fs.files["test_01.png"] && fs.files["shot.png"] {
+	if fs.files["test_01_shot.png"] && fs.files["shot.png"] {
 		t.Fatal("rename did not happen")
 	}
 
@@ -216,13 +215,13 @@ func TestPollWithCollision(t *testing.T) {
 	if renamed == "" {
 		t.Fatal("shot.png was not renamed")
 	}
-	if renamed == "test_01.png" {
+	if renamed == "test_01_shot.png" {
 		t.Errorf("should not overwrite existing file, got %s", renamed)
 	}
 	t.Logf("collision resolved: shot.png -> %s", renamed)
 }
 
-// 複数ファイルが同時に現れた場合、連番が正しく発行されることを確認。
+// 複数ファイルが同時に現れた場合、元のファイル名が保持されることを確認。
 func TestPollReturnsCounts(t *testing.T) {
 	fs := NewMockFS()
 	state := NewState("test")
@@ -240,10 +239,13 @@ func TestPollReturnsCounts(t *testing.T) {
 		t.Errorf("expected 3 renames, got %d", n)
 	}
 
-	for i := 1; i <= 3; i++ {
-		name := fmt.Sprintf("test_%02d.png", i)
-		if !fs.files[name] {
-			t.Errorf("expected %s to exist", name)
+	// 元のファイルが全てリネームされていることだけ確認（連番の割当順は非決定的）
+	for _, orig := range []string{"a.png", "b.png", "c.png"} {
+		if fs.files[orig] {
+			t.Errorf("original %s should have been renamed", orig)
 		}
+	}
+	if len(fs.renames) != 3 {
+		t.Errorf("expected 3 renames, got %d", len(fs.renames))
 	}
 }

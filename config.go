@@ -11,6 +11,4 @@ const (
 	InitialPrefix = "item"
 	// ポーリング間隔。新ファイル検出の頻度。
 	PollInterval = 300 * time.Millisecond
-	// 連番の桁数（例: 2 なら 01, 02, ...）。
-	CounterDigits = 2
 )
