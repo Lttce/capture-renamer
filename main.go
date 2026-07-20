@@ -23,6 +23,11 @@ func main() {
 	interval := flag.Int("interval", 300, "ポーリング間隔(ms)")
 	flag.Parse()
 
+	// 100ms未満のポーリング間隔はビジーループ相当の負荷になるため禁止
+	if *interval < 100 {
+		log.Fatalf("interval must be at least 100ms, got %dms", *interval)
+	}
+
 	w := NewWatcher(*folder, *prefix)
 
 	// 起動時スキャン: 既存ファイルをリネーム対象から除外する
