@@ -1,29 +1,46 @@
-// フォルダ監視と自動リネームのロジック。
-// ファイル操作は FileSystem interface 経由で行うため、本番（OSFileSystem）と
-// テスト（MockFS）を差し替え可能。
+// 設定定数、Watcher 構造体、リネーム処理までを一つのファイルに集約。
+// このツールの実質的な中身。
 package main
 
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
+// ---- 設定定数 ----
+
+const (
+	SaveFolder    = "."               // 監視対象フォルダ（起動引数からの読み込みは未実装）
+	InitialPrefix = "item"            // 起動時の初期prefix
+	PollInterval  = 300 * time.Millisecond // ポーリング間隔
+)
+
+// ---- Watcher ----
+
+// Watcher はフォルダ監視と自動リネームを担当する。
+// Poll() と SetPrefix() が別 goroutine で同時に呼ばれるため、
+// prefix, counter, knownFiles は mutex で保護する。
 type Watcher struct {
-	fs     FileSystem
-	state  *State
-	folder string
-	stop   chan struct{}
+	mu         sync.Mutex
+	folder     string          // 監視対象フォルダのパス
+	prefix     string          // 現在のリネームprefix（stdinから変更可能）
+	counter    int             // 次に発行する連番
+	knownFiles map[string]bool // 既に存在する／処理済みのファイル名
+	stop       chan struct{}   // Start() ループを停止するための通知チャネル
 }
 
-func NewWatcher(fs FileSystem, state *State, folder string) *Watcher {
+func NewWatcher(folder, initialPrefix string) *Watcher {
 	return &Watcher{
-		fs:     fs,
-		state:  state,
-		folder: folder,
-		stop:   make(chan struct{}),
+		folder:     folder,
+		prefix:     initialPrefix,
+		counter:    1,
+		knownFiles: make(map[string]bool),
+		stop:       make(chan struct{}),
 	}
 }
 
@@ -32,63 +49,113 @@ func (w *Watcher) Stop() {
 	close(w.stop)
 }
 
+// SetPrefix は prefix を変更し、連番を1にリセットする。
+func (w *Watcher) SetPrefix(p string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.prefix = p
+	w.counter = 1
+}
+
+func (w *Watcher) getPrefix() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.prefix
+}
+
+// nextSequence は次の連番を払い出し、カウンタを進める。
+func (w *Watcher) nextSequence() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := w.counter
+	w.counter++
+	return n
+}
+
+// isKnown はファイル名が既知（リネーム処理済み or 起動時から存在）か判定する。
+func (w *Watcher) isKnown(name string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.knownFiles[name]
+}
+
+// markKnown はファイル名を既知リストに追加する。
+func (w *Watcher) markKnown(name string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.knownFiles[name] = true
+}
+
+// uniqueNewName は base が既に存在する場合、末尾に (1), (2), ... を付与して
+// 衝突しないファイル名を返す。存在しなければ base をそのまま返す。
+func uniqueNewName(base string) string {
+	if _, err := os.Stat(base); os.IsNotExist(err) {
+		return base
+	}
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("%s (%d)%s", stem, i, ext)
+		if _, err := os.Stat(name); os.IsNotExist(err) {
+			return name
+		}
+	}
+}
+
 // ScanExisting は起動時に既存ファイルを全て既知リストに追加する。
 // これにより、既にあるファイルをリネーム対象から除外する。
 func (w *Watcher) ScanExisting() error {
-	entries, err := w.fs.ReadDir(w.folder)
+	entries, err := os.ReadDir(w.folder)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
-			w.state.MarkKnown(e.Name())
+			w.markKnown(e.Name())
 		}
 	}
 	return nil
 }
 
 // Poll は一度フォルダをスキャンし、新ファイルをリネームする。
-// リネーム後の名前は {prefix}_{連番}_{元のファイル名} 形式（拡張子保持）。
-// 既に同名ファイルが存在する場合は UniqueNewName で衝突を回避する。
-// 戻り値はリネームしたファイル数とエラー。
+// リネーム後の名前は {prefix}_{連番}_{元のファイル名}.{拡張子} 形式。
+// 既に同名ファイルが存在する場合は uniqueNewName で衝突を回避する。
+// 戻り値はリネームしたファイル数。リネーム失敗（書き込み中など）の場合は
+// 元ファイルを既知扱いにし、毎ポーリングで再試行しないようにする。
 func (w *Watcher) Poll() (int, error) {
-	entries, err := w.fs.ReadDir(w.folder)
+	entries, err := os.ReadDir(w.folder)
 	if err != nil {
 		return 0, err
 	}
 
-	// 既知リストにない = 新ファイル
+	// 既知リストにないファイル = 新ファイル
 	var newFiles []string
 	for _, e := range entries {
-		if !e.IsDir() && !w.state.IsKnown(e.Name()) {
+		if !e.IsDir() && !w.isKnown(e.Name()) {
 			newFiles = append(newFiles, e.Name())
 		}
 	}
 
 	renamed := 0
 	for _, name := range newFiles {
-		seq := w.state.NextSequence()
+		seq := w.nextSequence()
 		oldPath := filepath.Join(w.folder, name)
 
 		ext := filepath.Ext(name)
 		stem := strings.TrimSuffix(name, ext)
-		prefix := w.state.Prefix()
-		newName := fmt.Sprintf("%s_%02d_%s%s", prefix, seq, stem, ext)
-		newPath := filepath.Join(w.folder, newName)
+		p := w.getPrefix()
+		newName := fmt.Sprintf("%s_%02d_%s%s", p, seq, stem, ext)
+		newPath := uniqueNewName(filepath.Join(w.folder, newName))
 
-		newPath = UniqueNewName(w.fs, newPath)
-
-		if err := w.fs.Rename(oldPath, newPath); err != nil {
-			// リネーム失敗（書き込み中など）でも元ファイルを既知扱いにし、
-			// 毎ポーリングで再試行しないようにする。
+		if err := os.Rename(oldPath, newPath); err != nil {
 			log.Printf("rename failed: %s -> %s: %v", oldPath, newPath, err)
-			w.state.MarkKnown(name)
+			w.markKnown(name)
 			continue
 		}
 
 		log.Printf("renamed: %s -> %s", name, filepath.Base(newPath))
-		w.state.MarkKnown(name)
-		w.state.MarkKnown(filepath.Base(newPath))
+		w.markKnown(name)
+		w.markKnown(filepath.Base(newPath))
 		renamed++
 	}
 
