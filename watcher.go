@@ -1,3 +1,5 @@
+// 設定定数、Watcher 構造体、リネーム処理までを一つのファイルに集約。
+// このツールの実質的な中身。
 package main
 
 import (
@@ -10,19 +12,26 @@ import (
 	"time"
 )
 
+// ---- 設定定数 ----
+
 const (
-	SaveFolder    = "."
-	InitialPrefix = "item"
-	PollInterval  = 300 * time.Millisecond
+	SaveFolder    = "."               // 監視対象フォルダ（起動引数からの読み込みは未実装）
+	InitialPrefix = "item"            // 起動時の初期prefix
+	PollInterval  = 300 * time.Millisecond // ポーリング間隔
 )
 
+// ---- Watcher ----
+
+// Watcher はフォルダ監視と自動リネームを担当する。
+// Poll() と SetPrefix() が別 goroutine で同時に呼ばれるため、
+// prefix, counter, knownFiles は mutex で保護する。
 type Watcher struct {
 	mu         sync.Mutex
-	folder     string
-	prefix     string
-	counter    int
-	knownFiles map[string]bool
-	stop       chan struct{}
+	folder     string          // 監視対象フォルダのパス
+	prefix     string          // 現在のリネームprefix（stdinから変更可能）
+	counter    int             // 次に発行する連番
+	knownFiles map[string]bool // 既に存在する／処理済みのファイル名
+	stop       chan struct{}   // Start() ループを停止するための通知チャネル
 }
 
 func NewWatcher(folder, initialPrefix string) *Watcher {
@@ -35,10 +44,12 @@ func NewWatcher(folder, initialPrefix string) *Watcher {
 	}
 }
 
+// Stop は監視ループに停止を通知する。
 func (w *Watcher) Stop() {
 	close(w.stop)
 }
 
+// SetPrefix は prefix を変更し、連番を1にリセットする。
 func (w *Watcher) SetPrefix(p string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -52,6 +63,7 @@ func (w *Watcher) getPrefix() string {
 	return w.prefix
 }
 
+// nextSequence は次の連番を払い出し、カウンタを進める。
 func (w *Watcher) nextSequence() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -60,18 +72,22 @@ func (w *Watcher) nextSequence() int {
 	return n
 }
 
+// isKnown はファイル名が既知（リネーム処理済み or 起動時から存在）か判定する。
 func (w *Watcher) isKnown(name string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.knownFiles[name]
 }
 
+// markKnown はファイル名を既知リストに追加する。
 func (w *Watcher) markKnown(name string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.knownFiles[name] = true
 }
 
+// uniqueNewName は base が既に存在する場合、末尾に (1), (2), ... を付与して
+// 衝突しないファイル名を返す。存在しなければ base をそのまま返す。
 func uniqueNewName(base string) string {
 	if _, err := os.Stat(base); os.IsNotExist(err) {
 		return base
@@ -86,6 +102,8 @@ func uniqueNewName(base string) string {
 	}
 }
 
+// ScanExisting は起動時に既存ファイルを全て既知リストに追加する。
+// これにより、既にあるファイルをリネーム対象から除外する。
 func (w *Watcher) ScanExisting() error {
 	entries, err := os.ReadDir(w.folder)
 	if err != nil {
@@ -99,12 +117,18 @@ func (w *Watcher) ScanExisting() error {
 	return nil
 }
 
+// Poll は一度フォルダをスキャンし、新ファイルをリネームする。
+// リネーム後の名前は {prefix}_{連番}_{元のファイル名}.{拡張子} 形式。
+// 既に同名ファイルが存在する場合は uniqueNewName で衝突を回避する。
+// 戻り値はリネームしたファイル数。リネーム失敗（書き込み中など）の場合は
+// 元ファイルを既知扱いにし、毎ポーリングで再試行しないようにする。
 func (w *Watcher) Poll() (int, error) {
 	entries, err := os.ReadDir(w.folder)
 	if err != nil {
 		return 0, err
 	}
 
+	// 既知リストにないファイル = 新ファイル
 	var newFiles []string
 	for _, e := range entries {
 		if !e.IsDir() && !w.isKnown(e.Name()) {
@@ -138,6 +162,8 @@ func (w *Watcher) Poll() (int, error) {
 	return renamed, nil
 }
 
+// Start は interval 間隔で Poll を呼び続ける監視ループ。
+// Stop() が呼ばれるまでブロックする。
 func (w *Watcher) Start(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

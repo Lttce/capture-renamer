@@ -1,3 +1,5 @@
+// 実ファイル操作（t.TempDir() + os パッケージ）による Watcher のユニットテスト。
+// 各テストは独立したテンポラリディレクトリで実行され、テスト終了時に自動削除される。
 package main
 
 import (
@@ -6,6 +8,7 @@ import (
 	"testing"
 )
 
+// createFile はテンポラリディレクトリにダミーファイルを作成するヘルパー。
 func createFile(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
@@ -13,11 +16,13 @@ func createFile(t *testing.T, dir, name string) {
 	}
 }
 
+// fileExists はテンポラリディレクトリ上のファイルの存在確認。
 func fileExists(dir, name string) bool {
 	_, err := os.Stat(filepath.Join(dir, name))
 	return err == nil
 }
 
+// 起動時スキャンが既存ファイルを既知リストに登録することを確認。
 func TestScanExisting(t *testing.T) {
 	dir := t.TempDir()
 	createFile(t, dir, "a.png")
@@ -32,6 +37,7 @@ func TestScanExisting(t *testing.T) {
 	}
 }
 
+// 新ファイルが {prefix}_{連番}_{元ファイル名} にリネームされることを確認。
 func TestPollRenamesNewFile(t *testing.T) {
 	dir := t.TempDir()
 	w := NewWatcher(dir, "test")
@@ -53,6 +59,7 @@ func TestPollRenamesNewFile(t *testing.T) {
 	}
 }
 
+// 既知ファイルがポーリングで再処理されないことを確認。
 func TestPollSkipsKnownFiles(t *testing.T) {
 	dir := t.TempDir()
 	createFile(t, dir, "known.png")
@@ -69,6 +76,7 @@ func TestPollSkipsKnownFiles(t *testing.T) {
 	}
 }
 
+// prefix 切替で連番が1にリセットされることを確認。
 func TestPrefixSwitchResetsCounter(t *testing.T) {
 	dir := t.TempDir()
 	w := NewWatcher(dir, "a")
@@ -91,6 +99,7 @@ func TestPrefixSwitchResetsCounter(t *testing.T) {
 	}
 }
 
+// uniqueNewName が衝突時に (1) サフィックスを付けることを確認。
 func TestUniqueNewNameOnCollision(t *testing.T) {
 	dir := t.TempDir()
 	createFile(t, dir, "test_01.png")
@@ -104,6 +113,7 @@ func TestUniqueNewNameOnCollision(t *testing.T) {
 	}
 }
 
+// リネーム先ファイル名が衝突した場合、ユニーク化されてリネームされることを確認。
 func TestPollWithCollision(t *testing.T) {
 	dir := t.TempDir()
 	createFile(t, dir, "test_01_shot.png")
@@ -123,6 +133,7 @@ func TestPollWithCollision(t *testing.T) {
 		t.Error("original collision file should still exist")
 	}
 
+	// shot.png が (1) サフィックス付きでリネームされていることを確認
 	entries, _ := os.ReadDir(dir)
 	found := false
 	for _, e := range entries {
@@ -136,6 +147,7 @@ func TestPollWithCollision(t *testing.T) {
 	}
 }
 
+// 複数ファイルが同時に現れた場合、全てリネームされることを確認。
 func TestPollReturnsCounts(t *testing.T) {
 	dir := t.TempDir()
 	w := NewWatcher(dir, "test")
