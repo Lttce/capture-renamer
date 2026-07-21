@@ -19,7 +19,7 @@ import (
 
 func main() {
 	folder := flag.String("folder", ".", "監視フォルダのパス")
-	prefix := flag.String("prefix", "item", "初期prefix")
+	prefix := flag.String("prefix", "test", "初期prefix")
 	interval := flag.Int("interval", 300, "ポーリング間隔(ms)")
 	flag.Parse()
 
