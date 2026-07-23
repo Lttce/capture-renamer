@@ -6,12 +6,19 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // createFile はテンポラリディレクトリにダミーファイルを作成するヘルパー。
+// テスト用に最終編集時刻を2秒前に設定し、安定チェックを通過させる。
 func createFile(t *testing.T, dir, name string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-2 * time.Second)
+	if err := os.Chtimes(path, past, past); err != nil {
 		t.Fatal(err)
 	}
 }
