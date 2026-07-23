@@ -120,12 +120,20 @@ func (w *Watcher) Poll() (int, error) {
 		return 0, err
 	}
 
-	// 既知リストにないファイル = 新ファイル
+	// 既知リストになく、最終編集から1秒以上経過したファイル = 安定した新ファイル
 	var newFiles []string
 	for _, e := range entries {
-		if !e.IsDir() && !w.isKnown(e.Name()) {
-			newFiles = append(newFiles, e.Name())
+		if e.IsDir() || w.isKnown(e.Name()) {
+			continue
 		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if time.Since(info.ModTime()) < 1*time.Second {
+			continue // 書き込み中とみなしてスキップ
+		}
+		newFiles = append(newFiles, e.Name())
 	}
 
 	renamed := 0
