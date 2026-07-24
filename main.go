@@ -64,6 +64,13 @@ func main() {
 			fmt.Printf("Counter set to %d\n", n)
 		},
 	}
+	printAvailable := func() {
+		fmt.Print("Available commands:")
+		for name := range commands {
+			fmt.Printf(" :%s", name)
+		}
+		fmt.Println()
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	stdinDone := make(chan struct{})
 	go func() {
@@ -75,11 +82,12 @@ func main() {
 			if strings.HasPrefix(input, ":") {
 				parts := strings.Fields(input[1:])
 				if len(parts) == 0 {
+					printAvailable()
 					continue
 				}
 				handler, ok := commands[parts[0]]
 				if !ok {
-					fmt.Printf("unknown command: %s\n", parts[0])
+					printAvailable()
 					continue
 				}
 				handler(parts[1:])
