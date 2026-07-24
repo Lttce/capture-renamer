@@ -106,6 +106,26 @@ func TestPrefixSwitchResetsCounter(t *testing.T) {
 	}
 }
 
+// SetCounter で連番を指定した値に変更できることを確認。
+func TestSetCounter(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWatcher(dir, "test")
+	w.ScanExisting()
+
+	w.SetCounter(50)
+	createFile(t, dir, "shot.png")
+	n, err := w.Poll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 rename, got %d", n)
+	}
+	if !fileExists(dir, "test_50_shot.png") {
+		t.Error("expected test_50_shot.png (counter should be 50)")
+	}
+}
+
 // uniqueNewName が衝突時に (1) サフィックスを付けることを確認。
 func TestUniqueNewNameOnCollision(t *testing.T) {
 	dir := t.TempDir()

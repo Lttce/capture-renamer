@@ -49,6 +49,13 @@ func (w *Watcher) SetPrefix(p string) {
 	w.counter = 1
 }
 
+// SetCounter は連番を指定した値に設定する（prefixは変更しない）。
+func (w *Watcher) SetCounter(n int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.counter = n
+}
+
 func (w *Watcher) getPrefix() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
