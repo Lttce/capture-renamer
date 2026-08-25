@@ -3,9 +3,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -21,6 +24,21 @@ func createFile(t *testing.T, dir, name string) {
 	past := time.Now().Add(-2 * time.Second)
 	if err := os.Chtimes(path, past, past); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// createFileAsync は createFile のサブ goroutine 版。
+// t.Fatal はテスト goroutine からしか呼べないため、失敗は t.Errorf で報告する。
+func createFileAsync(t *testing.T, dir, name string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
+		t.Errorf("write %s: %v", name, err)
+		return
+	}
+	past := time.Now().Add(-2 * time.Second)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Errorf("chtimes %s: %v", name, err)
 	}
 }
 
@@ -295,4 +313,83 @@ func TestPollReturnsCounts(t *testing.T) {
 			t.Errorf("expected %s, got %v", want, dirNames(t, dir))
 		}
 	}
+}
+
+// 本番と同じ goroutine 構成（Start のポーリング × stdin 側の SetPrefix/SetCounter）を
+// 実際に走らせ、共有状態への競合を -race で検出させる。
+// 他のテストは全て単一 goroutine で Poll を直接呼ぶため、この経路を踏むのはここだけ。
+//
+// 目的は -race による競合検出なので結果の中身は検証しないが、
+// 「1件もリネームされないまま素通りして通過した」状態を防ぐため
+// 最後にリネームが実際に起きたことだけ確認する。
+func TestConcurrentPollAndPrefixSwitch(t *testing.T) {
+	const numFiles = 100
+
+	dir := t.TempDir()
+	w := NewWatcher(dir, "test")
+	if err := w.ScanExisting(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 監視ループ。Stop 後に確実に抜けたことを待つため done で同期する。
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Start(1 * time.Millisecond)
+	}()
+
+	var wg sync.WaitGroup
+
+	// stdin 相当: prefix と連番を切り替え続ける。
+	// ポーリングと重なるよう、ファイル供給と同程度の時間をかける。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			w.SetPrefix(fmt.Sprintf("p%d", i))
+			w.SetCounter(i%50 + 1)
+			time.Sleep(100 * time.Microsecond)
+		}
+	}()
+
+	// リネーム対象を供給する（mtime は2秒前なので即座に対象になる）
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < numFiles; i++ {
+			createFileAsync(t, dir, fmt.Sprintf("f%04d.png", i))
+			time.Sleep(1 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+
+	// 供給したファイルがリネームされきるまで待つ
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && countUnrenamed(t, dir) > 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	w.Stop()
+	<-done // Poll 実行中に t.TempDir() が消えないよう待つ
+
+	if remaining := countUnrenamed(t, dir); remaining > 0 {
+		t.Errorf("%d/%d files left unrenamed after deadline", remaining, numFiles)
+	}
+	if renamed := numFiles - countUnrenamed(t, dir); renamed == 0 {
+		t.Fatal("no file was renamed; the concurrent path was never exercised")
+	}
+}
+
+// countUnrenamed は元の名前（f0000.png 形式）のままのファイル数を返す。
+// リネーム後は prefix と連番が前置されるため、先頭が "f" のものが未処理。
+func countUnrenamed(t *testing.T, dir string) int {
+	t.Helper()
+	n := 0
+	for _, name := range dirNames(t, dir) {
+		if strings.HasPrefix(name, "f") {
+			n++
+		}
+	}
+	return n
 }
