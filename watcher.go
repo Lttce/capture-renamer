@@ -71,6 +71,18 @@ func (w *Watcher) nextSequence() int {
 	return n
 }
 
+// releaseSequence は nextSequence で払い出した連番 n を差し戻す。
+// rename に失敗してファイル名に使われなかった番号を欠番にしないため。
+// 払い出し後に SetCounter で値が変わっていた場合は、ユーザー指定を
+// 上書きしないよう何もしない。
+func (w *Watcher) releaseSequence(n int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.counter == n+1 {
+		w.counter = n
+	}
+}
+
 // isKnown はファイル名が既知（リネーム処理済み or 起動時から存在）か判定する。
 func (w *Watcher) isKnown(name string) bool {
 	w.mu.Lock()
@@ -135,6 +147,7 @@ func (w *Watcher) ScanExisting() error {
 // 既に同名ファイルが存在する場合は uniqueNewName で衝突を回避する。
 // 戻り値はリネームしたファイル数。リネーム失敗（書き込み中など）の場合は
 // 元ファイルを既知扱いにし、毎ポーリングで再試行しないようにする。
+// 失敗時は払い出した連番も差し戻すため、番号は欠けない。
 func (w *Watcher) Poll() (int, error) {
 	entries, err := os.ReadDir(w.folder)
 	if err != nil {
@@ -170,6 +183,7 @@ func (w *Watcher) Poll() (int, error) {
 
 		if err := os.Rename(oldPath, newPath); err != nil {
 			log.Printf("rename failed: %s -> %s: %v", oldPath, newPath, err)
+			w.releaseSequence(seq)
 			w.markKnown(name)
 			continue
 		}

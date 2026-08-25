@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -123,6 +124,73 @@ func TestSetCounter(t *testing.T) {
 	}
 	if !fileExists(dir, "test_50_shot.png") {
 		t.Error("expected test_50_shot.png (counter should be 50)")
+	}
+}
+
+// releaseSequence が払い出した連番を差し戻すことを確認。
+func TestReleaseSequence(t *testing.T) {
+	w := NewWatcher(t.TempDir(), "test")
+
+	n := w.nextSequence()
+	w.releaseSequence(n)
+
+	if got := w.nextSequence(); got != n {
+		t.Errorf("expected released sequence %d to be reused, got %d", n, got)
+	}
+}
+
+// 払い出し後に SetCounter された場合、releaseSequence が指定値を上書きしないことを確認。
+func TestReleaseSequenceKeepsSetCounter(t *testing.T) {
+	w := NewWatcher(t.TempDir(), "test")
+
+	n := w.nextSequence()
+	w.SetCounter(50)
+	w.releaseSequence(n)
+
+	if got := w.nextSequence(); got != 50 {
+		t.Errorf("SetCounter(50) should win over releaseSequence, got %d", got)
+	}
+}
+
+// rename 失敗時に連番が欠番にならないことを確認。
+// 監視フォルダから書き込み権限を外して rename を失敗させる。
+func TestPollKeepsSequenceOnRenameFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod によるディレクトリ書き込み禁止が効かないためスキップ")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root はパーミッションを無視して rename に成功するためスキップ")
+	}
+
+	dir := t.TempDir()
+	w := NewWatcher(dir, "test")
+	w.ScanExisting()
+
+	createFile(t, dir, "fail.png")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	// t.TempDir() のクリーンアップが失敗しないよう権限を戻す
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+
+	n, err := w.Poll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 renames in a read-only dir, got %d", n)
+	}
+
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	createFile(t, dir, "ok.png")
+	if _, err := w.Poll(); err != nil {
+		t.Fatal(err)
+	}
+	// 失敗した分で連番を消費していなければ 01 から始まる
+	if !fileExists(dir, "test_01_ok.png") {
+		t.Error("expected test_01_ok.png (failed rename must not consume a sequence number)")
 	}
 }
 
