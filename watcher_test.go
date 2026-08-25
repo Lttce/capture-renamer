@@ -30,6 +30,21 @@ func fileExists(dir, name string) bool {
 	return err == nil
 }
 
+// dirNames はディレクトリ内のファイル名一覧を返す。
+// アサーション失敗時に「実際は何があったか」を出すためのヘルパー。
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
 // 起動時スキャンが既存ファイルを既知リストに登録することを確認。
 func TestScanExisting(t *testing.T) {
 	dir := t.TempDir()
@@ -245,17 +260,9 @@ func TestPollWithCollision(t *testing.T) {
 		t.Error("original collision file should still exist")
 	}
 
-	// shot.png が (1) サフィックス付きでリネームされていることを確認
-	entries, _ := os.ReadDir(dir)
-	found := false
-	for _, e := range entries {
-		if e.Name() != "test_01_shot.png" && len(e.Name()) > 13 && e.Name()[:13] == "test_01_shot " {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("expected renamed file with '(1)' suffix, got:", dir)
+	// shot.png は衝突回避で (1) サフィックス付きの名前になる
+	if !fileExists(dir, "test_01_shot (1).png") {
+		t.Errorf("expected test_01_shot (1).png, got %v", dirNames(t, dir))
 	}
 }
 
@@ -282,14 +289,10 @@ func TestPollReturnsCounts(t *testing.T) {
 		}
 	}
 
-	entries, _ := os.ReadDir(dir)
-	count := 0
-	for _, e := range entries {
-		if len(e.Name()) > 5 && e.Name()[:5] == "test_" {
-			count++
+	// os.ReadDir は名前順で返すため、a→01, b→02, c→03 と連番が決まる
+	for _, want := range []string{"test_01_a.png", "test_02_b.png", "test_03_c.png"} {
+		if !fileExists(dir, want) {
+			t.Errorf("expected %s, got %v", want, dirNames(t, dir))
 		}
-	}
-	if count != 3 {
-		t.Errorf("expected 3 renamed files, got %d", count)
 	}
 }
