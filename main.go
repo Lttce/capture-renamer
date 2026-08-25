@@ -29,6 +29,10 @@ func main() {
 		log.Fatalf("interval must be at least 100ms, got %dms", *interval)
 	}
 
+	if err := validatePrefix(*prefix); err != nil {
+		log.Fatalf("invalid -prefix: %v", err)
+	}
+
 	w := NewWatcher(*folder, *prefix)
 
 	// 起動時スキャン: 既存ファイルをリネーム対象から除外する
@@ -91,6 +95,10 @@ func main() {
 					continue
 				}
 				handler(parts[1:])
+				continue
+			}
+			if err := validatePrefix(input); err != nil {
+				fmt.Println(err)
 				continue
 			}
 			w.SetPrefix(input)

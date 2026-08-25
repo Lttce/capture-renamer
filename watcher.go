@@ -85,6 +85,20 @@ func (w *Watcher) markKnown(name string) {
 	w.knownFiles[name] = true
 }
 
+// validatePrefix は prefix としてファイル名に埋め込める文字列か検証する。
+// パス区切り文字を許すと filepath.Join がパスとして解決してしまい、
+// `../foo` のように監視フォルダ外へファイルが出たり、存在しないディレクトリへの
+// rename が失敗したりするため、ここで弾く。
+func validatePrefix(p string) error {
+	if p == "" {
+		return fmt.Errorf("prefix must not be empty")
+	}
+	if strings.ContainsAny(p, `/\`) {
+		return fmt.Errorf(`prefix must not contain path separators (/ or \)`)
+	}
+	return nil
+}
+
 // uniqueNewName は base が既に存在する場合、末尾に (1), (2), ... を付与して
 // 衝突しないファイル名を返す。存在しなければ base をそのまま返す。
 func uniqueNewName(base string) string {

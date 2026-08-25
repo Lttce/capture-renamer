@@ -126,6 +126,23 @@ func TestSetCounter(t *testing.T) {
 	}
 }
 
+// validatePrefix がパス区切り文字と空文字を弾き、通常の prefix を通すことを確認。
+func TestValidatePrefix(t *testing.T) {
+	valid := []string{"test", "test01", "項目 A", "..", "a:b*c"}
+	for _, p := range valid {
+		if err := validatePrefix(p); err != nil {
+			t.Errorf("validatePrefix(%q) should be valid, got %v", p, err)
+		}
+	}
+
+	invalid := []string{"", "../foo", "a/b", `a\b`, "/", `\`}
+	for _, p := range invalid {
+		if err := validatePrefix(p); err == nil {
+			t.Errorf("validatePrefix(%q) should be invalid, got nil", p)
+		}
+	}
+}
+
 // uniqueNewName が衝突時に (1) サフィックスを付けることを確認。
 func TestUniqueNewNameOnCollision(t *testing.T) {
 	dir := t.TempDir()
