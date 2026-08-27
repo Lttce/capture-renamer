@@ -266,7 +266,7 @@ func TestViewShowsStatus(t *testing.T) {
 	m.w.SetPrefix("shot")
 	m.w.SetCounter(3)
 	view := plainView(m)
-	for _, want := range []string{"capture-renamer", dir, "shot", "next: 03", "watching", "10ms"} {
+	for _, want := range []string{"capture-renamer", dir, "shot", "next: 03", "preview: shot_03_image.png", "watching", "10ms"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("View should contain %q:\n%s", want, view)
 		}
@@ -900,5 +900,37 @@ func TestMessagesAreUserFacing(t *testing.T) {
 				t.Errorf("%s: message = %q に内部用語 %q が入っている", tc.name, m.message, bad)
 			}
 		}
+	}
+}
+
+// preview に「次に付く名前」の見本を出す。prefix と連番を変えると見本も変わる。
+func TestNextNamePreview(t *testing.T) {
+	if got := ansi.ReplaceAllString(nextName("01", 3), ""); got != "01_03_image.png" {
+		t.Errorf("nextName(01, 3) = %q, want 01_03_image.png", got)
+	}
+
+	m, _ := newTestTUI(t)
+	m.w.SetPrefix("01")
+	if !strings.Contains(plainView(m), "preview: 01_01_image.png") {
+		t.Errorf("見本が出ていない:\n%s", plainView(m))
+	}
+
+	// 番号送りで prefix が変わると見本も追従する
+	m = clickButton(t, m, 1)
+	if !strings.Contains(plainView(m), "preview: 02_01_image.png") {
+		t.Errorf("番号送り後の見本が違う:\n%s", plainView(m))
+	}
+
+	// :seq で連番を変えても追従する
+	m = enter(t, typeText(t, m, ":seq 12"))
+	if !strings.Contains(plainView(m), "preview: 02_12_image.png") {
+		t.Errorf(":seq 後の見本が違う:\n%s", plainView(m))
+	}
+
+	// リネームが進むと次の番号になる
+	m, _ = update(t, m, pollMsg{results: []Rename{{Old: "a.png", New: "02_12_a.png"}}})
+	m.w.SetCounter(13)
+	if !strings.Contains(plainView(m), "preview: 02_13_image.png") {
+		t.Errorf("リネーム後の見本が違う:\n%s", plainView(m))
 	}
 }

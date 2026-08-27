@@ -21,11 +21,21 @@ import (
 // View のレイアウト。行数を固定して端末が縦に揺れないようにする。
 const (
 	indent     = 2   // 左余白
-	headerRows = 5   // タイトル / prefix 行 / 入力欄 / メッセージ / 履歴見出し
+	headerRows = 6   // タイトル / prefix 行 / preview / 入力欄 / メッセージ / 履歴見出し
 	tuiFooter  = 1   // ヘルプ
 	historyMax = 500 // 保持する履歴の上限（古いものから捨てる）
 	minHeight  = 10  // WindowSizeMsg が来る前に使う仮の高さ
 )
+
+// sampleName は next の見本に使う、元ファイル名の代わりの文字列。
+// 実際にはここに撮影されたファイル名が入る。
+const sampleName = "image.png"
+
+// nextName は次にリネームされる名前の見本を返す（例: 01_03_image.png）。
+// 見本の部分は薄く出して、実際には撮影されたファイル名が入ることを示す。
+func nextName(prefix string, seq int) string {
+	return fmt.Sprintf("%s_%02d_%s", prefix, seq, dimStyle.Render(sampleName))
+}
 
 // prefix 行のボタンのレイアウト。View と当たり判定 (buttonAt) の両方がここを参照する。
 //
@@ -477,6 +487,7 @@ func (m tuiModel) View() string {
 			pad, prefixLabel,
 			m.renderButton(0), gap, titleStyle.Render(prefix), gap, m.renderButton(1),
 			nextSeq, m.interval),
+		fmt.Sprintf("%spreview: %s", pad, nextName(prefix, nextSeq)),
 		fmt.Sprintf("%s%s%s_", pad, m.promptLabel(), m.input),
 		msgLine(pad, msg),
 		pad+dimStyle.Render(fmt.Sprintf("history (%d)", len(m.history))),
