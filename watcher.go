@@ -18,6 +18,12 @@ import (
 // Poll() と SetPrefix() が別 goroutine で同時に呼ばれるため、
 // prefix, counter, knownFiles は mutex で保護する。
 type Watcher struct {
+	// opMu はフォルダへの書き込み（Poll と Retag）を直列化する。
+	// TUI では Poll が tea.Cmd の goroutine、Retag が画面側で動くため、
+	// 同じフォルダに2つの書き手が居る。uniqueNewName で名前を決めてから
+	// os.Rename するまでの間に相手が同じ名前を使うと、片方が上書きで消える。
+	// mu より先に取る（逆順に取る経路は作らない）。
+	opMu       sync.Mutex
 	mu         sync.Mutex
 	folder     string          // 監視対象フォルダのパス
 	prefix     string          // 現在のリネームprefix（stdinから変更可能）
@@ -56,10 +62,15 @@ func (w *Watcher) SetCounter(n int) {
 	w.counter = n
 }
 
-func (w *Watcher) getPrefix() string {
+// nextTag は prefix と次の連番を1回のロックでまとめて払い出す。
+// 別々に取ると、その間に SetPrefix（ボタン操作など）が入り込んで
+// 「新しい prefix + リセット前の連番」という組み合わせのファイル名になる。
+func (w *Watcher) nextTag() (prefix string, seq int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.prefix
+	n := w.counter
+	w.counter++
+	return w.prefix, n
 }
 
 // Status は表示用に現在の prefix と次に払い出す連番を返す。
@@ -69,16 +80,7 @@ func (w *Watcher) Status() (prefix string, nextSeq int) {
 	return w.prefix, w.counter
 }
 
-// nextSequence は次の連番を払い出し、カウンタを進める。
-func (w *Watcher) nextSequence() int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	n := w.counter
-	w.counter++
-	return n
-}
-
-// releaseSequence は nextSequence で払い出した連番 n を差し戻す。
+// releaseSequence は nextTag で払い出した連番 n を差し戻す。
 // rename に失敗してファイル名に使われなかった番号を欠番にしないため。
 // 払い出し後に SetCounter で値が変わっていた場合は、ユーザー指定を
 // 上書きしないよう何もしない。
@@ -120,15 +122,20 @@ func validatePrefix(p string) error {
 
 // uniqueNewName は base が既に存在する場合、末尾に (1), (2), ... を付与して
 // 衝突しないファイル名を返す。存在しなければ base をそのまま返す。
+//
+// Stat が「存在しない」以外のエラー（権限が無い、名前が長すぎる等）を返した場合も
+// その名前を返す。os.IsNotExist だけを終了条件にすると、そうしたエラーが続く限り
+// 無限ループになり、呼び出し元（TUI の Update）ごと固まってしまうため。
+// 名前が本当に使えなければ、続く os.Rename が理由付きで失敗する。
 func uniqueNewName(base string) string {
-	if _, err := os.Stat(base); os.IsNotExist(err) {
+	if _, err := os.Stat(base); err != nil {
 		return base
 	}
 	ext := filepath.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
 	for i := 1; ; i++ {
 		name := fmt.Sprintf("%s (%d)%s", stem, i, ext)
-		if _, err := os.Stat(name); os.IsNotExist(err) {
+		if _, err := os.Stat(name); err != nil {
 			return name
 		}
 	}
@@ -168,6 +175,9 @@ type Rename struct {
 // 画面を壊さないため、ここではログを出さず結果を返すだけにする。
 // ログ出力は -plain モードの Start が担当する。
 func (w *Watcher) Poll() ([]Rename, error) {
+	w.opMu.Lock()
+	defer w.opMu.Unlock()
+
 	entries, err := os.ReadDir(w.folder)
 	if err != nil {
 		return nil, err
@@ -191,12 +201,11 @@ func (w *Watcher) Poll() ([]Rename, error) {
 
 	var results []Rename
 	for _, name := range newFiles {
-		seq := w.nextSequence()
+		p, seq := w.nextTag()
 		oldPath := filepath.Join(w.folder, name)
 
 		ext := filepath.Ext(name)
 		stem := strings.TrimSuffix(name, ext)
-		p := w.getPrefix()
 		newName := fmt.Sprintf("%s_%02d_%s%s", p, seq, stem, ext)
 		newPath := uniqueNewName(filepath.Join(w.folder, newName))
 
@@ -226,6 +235,9 @@ func (w *Watcher) Poll() ([]Rename, error) {
 // 元々リネームに失敗している要素（Err 付き）は対象外。ファイルが既に消えていた
 // 場合などは、その1件だけを失敗として飛ばし、残りは処理を続ける。
 func (w *Watcher) Retag(items []Rename, prefix string) ([]Rename, int, []string) {
+	w.opMu.Lock()
+	defer w.opMu.Unlock()
+
 	updated := make([]Rename, len(items))
 	copy(updated, items)
 
@@ -239,6 +251,13 @@ func (w *Watcher) Retag(items []Rename, prefix string) ([]Rename, int, []string)
 		}
 
 		newName := fmt.Sprintf("%s_%02d_%s", prefix, seq, r.Old)
+		if newName == r.New {
+			// 既に付けたい名前になっている。ここで rename すると uniqueNewName が
+			// 自分自身を衝突とみなして (1) を付けてしまうので、成功扱いで飛ばす。
+			// 同じ prefix のまま連番だけ詰め直す時にこれが起きる。
+			seq++
+			continue
+		}
 		newPath := uniqueNewName(filepath.Join(w.folder, newName))
 		if err := os.Rename(filepath.Join(w.folder, r.New), newPath); err != nil {
 			failed = append(failed, r.New)
