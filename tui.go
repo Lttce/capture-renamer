@@ -121,18 +121,19 @@ type tuiModel struct {
 	folder   string
 	interval time.Duration
 
-	input   string   // 入力中の prefix またはコマンド
-	history []Rename // 新しい順
-	message string   // 直近の通知・エラー（1行）
-	isErr   bool     // message がエラーか
-	paused  bool
-	polling bool // Poll が実行中（重複起動を防ぐ）
-	hover   int  // マウスが乗っているボタン番号、無ければ -1
-	height  int
+	input    string   // 入力中の prefix またはコマンド
+	history  []Rename // 新しい順
+	message  string   // 直近の通知・エラー（1行）
+	isErr    bool     // message がエラーか
+	paused   bool
+	polling  bool // Poll が実行中（重複起動を防ぐ）
+	hover    int  // マウスが乗っているボタン番号、無ければ -1
+	selected int  // 選択中の履歴の最古の位置（0..selected が選択範囲）。無選択は -1
+	height   int
 }
 
 func newTUIModel(w *Watcher, folder string, interval time.Duration) tuiModel {
-	return tuiModel{w: w, folder: folder, interval: interval, height: minHeight, hover: -1}
+	return tuiModel{w: w, folder: folder, interval: interval, height: minHeight, hover: -1, selected: -1}
 }
 
 // historyRows は履歴に使える行数。
@@ -142,6 +143,29 @@ func (m tuiModel) historyRows() int {
 		return 1
 	}
 	return n
+}
+
+// historyTop は履歴の1行目の行番号（View の先頭を 0 とする）。
+const historyTop = headerRows
+
+// historyRowAt は画面上の y 行目にある履歴のインデックスを返す。無ければ -1。
+func (m tuiModel) historyRowAt(y int) int {
+	if y < historyTop || y >= historyTop+m.historyRows() {
+		return -1
+	}
+	i := y - historyTop
+	if i >= len(m.history) {
+		return -1
+	}
+	return i
+}
+
+// selectedCount は選択中の件数。
+func (m tuiModel) selectedCount() int {
+	if m.selected < 0 {
+		return 0
+	}
+	return m.selected + 1
 }
 
 func tickCmd(d time.Duration) tea.Cmd {
@@ -185,8 +209,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			newest = append(newest, msg.results[i])
 		}
 		m.history = append(newest, m.history...)
+		// 選択は「この行から最新まで」なので、新着の分だけ位置をずらす。
+		// ずらさないと選択の一番古い側が範囲から外れてしまう。
+		if m.selected >= 0 {
+			m.selected += len(msg.results)
+		}
 		if len(m.history) > historyMax {
 			m.history = m.history[:historyMax]
+			if m.selected > len(m.history)-1 {
+				m.selected = len(m.history) - 1
+			}
 		}
 
 	case tea.KeyMsg:
@@ -198,13 +230,29 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouse は prefix 増減ボタンのホバーとクリックを処理する。
+// handleMouse は prefix 増減ボタンと、履歴行の選択を処理する。
 func (m tuiModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	prefix, _ := m.w.Status()
 	i := buttonAt(msg.X, msg.Y, prefix)
 	m.hover = i
-	if i >= 0 && msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+
+	press := msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft
+	if !press {
+		return m, nil
+	}
+	if i >= 0 {
 		return m.bump(prefixButtons[i].delta), nil
+	}
+
+	// 履歴行のクリックで「その行から最新まで」を選ぶ。同じ行をもう一度押すと解除。
+	if row := m.historyRowAt(msg.Y); row >= 0 {
+		if m.selected == row {
+			m.selected = -1
+			m.message, m.isErr = "", false
+			return m, nil
+		}
+		m.selected = row
+		m.message, m.isErr = fmt.Sprintf("選択中の %d 件を付け替えます。新しい prefix を入力して Enter（Esc で解除）", m.selectedCount()), false
 	}
 	return m, nil
 }
@@ -233,6 +281,9 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.message, m.isErr = "監視を再開しました", false
 		}
+	case tea.KeyEsc:
+		m.selected = -1
+		m.message, m.isErr = "", false
 	case tea.KeyCtrlU:
 		m.input = ""
 	case tea.KeyBackspace:
@@ -249,7 +300,8 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applyInput は入力欄の内容を確定する。`:` 始まりはコマンド、それ以外は prefix。
+// applyInput は入力欄の内容を確定する。
+// `:` 始まりはコマンド、履歴を選択中なら付け替え、それ以外は prefix の切り替え。
 func (m tuiModel) applyInput() tuiModel {
 	input := strings.TrimSpace(m.input)
 	if input == "" {
@@ -265,8 +317,35 @@ func (m tuiModel) applyInput() tuiModel {
 		m.message, m.isErr = err.Error(), true
 		return m
 	}
+
+	if m.selected >= 0 {
+		return m.retag(input)
+	}
+
 	m.w.SetPrefix(input)
 	m.message, m.isErr = fmt.Sprintf("prefix を %q に変更、連番をリセット", input), false
+	return m
+}
+
+// retag は選択中の履歴（0..selected）を新しい prefix で付け直し、
+// これからの撮影もその prefix に切り替える。連番は付け替えた分の続きから。
+func (m tuiModel) retag(prefix string) tuiModel {
+	target := m.history[:m.selectedCount()]
+	updated, renamed, errs := m.w.Retag(target, prefix)
+	copy(m.history, updated)
+	m.selected = -1
+
+	if renamed == 0 {
+		m.message, m.isErr = fmt.Sprintf("付け替えられませんでした: %v", errs), true
+		return m
+	}
+
+	m.w.SetPrefix(prefix)
+	m.w.SetCounter(renamed + 1)
+	m.message, m.isErr = fmt.Sprintf("%d 件を %q に付け替え、次の連番は %02d", renamed, prefix, renamed+1), false
+	if len(errs) > 0 {
+		m.message, m.isErr = fmt.Sprintf("%s（%d 件失敗: %v）", m.message, len(errs), errs[0]), true
+	}
 	return m
 }
 
@@ -312,6 +391,14 @@ func (m tuiModel) renderButton(i int) string {
 	return prefixButtons[i].label
 }
 
+// promptLabel は入力欄の見出し。履歴を選択中は付け替えだと分かるようにする。
+func (m tuiModel) promptLabel() string {
+	if m.selected >= 0 {
+		return fmt.Sprintf("選択中 %d 件の新しい prefix> ", m.selectedCount())
+	}
+	return "新しい prefix> "
+}
+
 func (m tuiModel) View() string {
 	pad := strings.Repeat(" ", indent)
 
@@ -339,7 +426,11 @@ func (m tuiModel) View() string {
 			lines = append(lines, "") // 余った行も空行で埋めて行数を一定に保つ
 			continue
 		}
-		lines = append(lines, pad+renameLine(m.history[i]))
+		marker := "  "
+		if i <= m.selected {
+			marker = "▸ " // 選択中（0..selected が範囲）
+		}
+		lines = append(lines, pad+marker+renameLine(m.history[i]))
 	}
 
 	msg := m.message
@@ -349,8 +440,8 @@ func (m tuiModel) View() string {
 	lines = append(lines,
 		"",
 		pad+msg,
-		fmt.Sprintf("%s新しい prefix> %s_", pad, m.input),
-		pad+dimStyle.Render("[ - ]/[ + ] クリックで番号送り   Enter 確定   :seq N 連番指定   Ctrl+U 消去   Ctrl+P 停止   Ctrl+C 終了"),
+		fmt.Sprintf("%s%s%s_", pad, m.promptLabel(), m.input),
+		pad+dimStyle.Render("[ - ]/[ + ] 番号送り   履歴クリックで選択→新 prefix で付け替え（Esc 解除）   :seq N   Ctrl+P 停止   Ctrl+C 終了"),
 	)
 
 	// 端末より高いフレームを返すと Bubble Tea が「上から」行を捨てるため

@@ -556,3 +556,203 @@ func lastLine(s string) string {
 	lines := strings.Split(s, "\n")
 	return lines[len(lines)-1]
 }
+
+// clickHistory は履歴の i 番目の行を左クリックする。
+func clickHistory(t *testing.T, m tuiModel, i int) tuiModel {
+	t.Helper()
+	m, _ = update(t, m, tea.MouseMsg{
+		X:      indent,
+		Y:      historyTop + i,
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+	})
+	return m
+}
+
+// withHistory は履歴を n 件持ったモデルを返す（新しい順に a{n-1} … a0）。
+func withHistory(t *testing.T, n int) tuiModel {
+	t.Helper()
+	m, _ := newTestTUI(t)
+	results := make([]Rename, n)
+	for i := range results {
+		results[i] = Rename{Old: fmt.Sprintf("a%d.png", i), New: fmt.Sprintf("01_%02d_a%d.png", i+1, i)}
+	}
+	m, _ = update(t, m, pollMsg{results: results})
+	return m
+}
+
+func TestHistoryRowAt(t *testing.T) {
+	m := withHistory(t, 3)
+	for i := 0; i < 3; i++ {
+		if got := m.historyRowAt(historyTop + i); got != i {
+			t.Errorf("historyRowAt(%d) = %d, want %d", historyTop+i, got, i)
+		}
+	}
+	for _, y := range []int{0, prefixRow, historyTop - 1, historyTop + 3, historyTop + m.historyRows()} {
+		if got := m.historyRowAt(y); got != -1 {
+			t.Errorf("historyRowAt(%d) = %d, want -1", y, got)
+		}
+	}
+}
+
+func TestClickSelectsRangeToNewest(t *testing.T) {
+	m := withHistory(t, 5)
+	m = clickHistory(t, m, 2)
+	if m.selected != 2 || m.selectedCount() != 3 {
+		t.Fatalf("selected=%d count=%d, want 2 / 3", m.selected, m.selectedCount())
+	}
+	if !strings.Contains(plainView(m), "選択中 3 件の新しい prefix>") {
+		t.Errorf("入力欄が付け替えモードになっていない:\n%s", plainView(m))
+	}
+	// 選択範囲だけにマーカーが付く
+	lines := strings.Split(plainView(m), "\n")
+	for i := 0; i < 5; i++ {
+		marked := strings.Contains(lines[historyTop+i], "▸")
+		if want := i <= 2; marked != want {
+			t.Errorf("履歴 %d 行目のマーカー = %v, want %v (%q)", i, marked, want, lines[historyTop+i])
+		}
+	}
+	// 同じ行をもう一度押すと解除
+	m = clickHistory(t, m, 2)
+	if m.selected != -1 {
+		t.Errorf("selected = %d, want -1", m.selected)
+	}
+}
+
+func TestEscClearsSelection(t *testing.T) {
+	m := withHistory(t, 3)
+	m = clickHistory(t, m, 1)
+	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.selected != -1 || m.message != "" {
+		t.Errorf("selected=%d message=%q, want -1 / 空", m.selected, m.message)
+	}
+	if !strings.Contains(plainView(m), "新しい prefix>") || strings.Contains(plainView(m), "選択中") {
+		t.Errorf("入力欄が通常に戻っていない:\n%s", plainView(m))
+	}
+}
+
+// 履歴を選んで新しい prefix を入れると、実ファイルが付け替わり、
+// これからの撮影もその prefix になる。
+func TestRetagFlowRenamesFilesAndSwitchesPrefix(t *testing.T) {
+	m, dir := newTestTUI(t)
+	m.w.SetPrefix("01")
+	for _, name := range []string{"a.png", "b.png", "c.png"} {
+		createFile(t, dir, name)
+	}
+	msg := pollCmd(m.w)().(pollMsg)
+	m, _ = update(t, m, msg)
+
+	// 新しい順に c, b, a。b（index 1）から最新までを 02 にする
+	m = clickHistory(t, m, 1)
+	m = enter(t, typeText(t, m, "02"))
+
+	for _, want := range []string{"01_01_a.png", "02_01_b.png", "02_02_c.png"} {
+		if !fileExists(dir, want) {
+			t.Errorf("%s が無い: %v", want, dirNames(t, dir))
+		}
+	}
+	if m.selected != -1 {
+		t.Errorf("selected = %d, want -1（付け替え後は解除）", m.selected)
+	}
+	// 履歴の表示も新しい名前になる
+	view := plainView(m)
+	for _, want := range []string{"02_02_c.png", "02_01_b.png", "01_01_a.png"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("履歴に %s が出ていない:\n%s", want, view)
+		}
+	}
+	// これからの撮影は 02 の続きから
+	prefix, next := m.w.Status()
+	if prefix != "02" || next != 3 {
+		t.Errorf("prefix=%q next=%d, want 02 / 3", prefix, next)
+	}
+	if m.isErr || !strings.Contains(m.message, "2 件") {
+		t.Errorf("message = %q (isErr=%v), want 2件付け替えた通知", m.message, m.isErr)
+	}
+
+	// 続けて撮ったファイルが 02_03 になる
+	createFile(t, dir, "d.png")
+	m, _ = update(t, m, pollCmd(m.w)().(pollMsg))
+	if !fileExists(dir, "02_03_d.png") {
+		t.Errorf("02_03_d.png が無い: %v", dirNames(t, dir))
+	}
+}
+
+func TestRetagRejectsInvalidPrefix(t *testing.T) {
+	m := withHistory(t, 3)
+	m = clickHistory(t, m, 1)
+	m = enter(t, typeText(t, m, "a/b"))
+	if m.selected != 1 {
+		t.Errorf("selected = %d, want 1（不正な入力で選択は解除しない）", m.selected)
+	}
+	if !m.isErr {
+		t.Errorf("message = %q, want エラー", m.message)
+	}
+}
+
+// 選択中でも :seq などのコマンドはそのまま使える。
+func TestCommandsWorkWhileSelected(t *testing.T) {
+	m := withHistory(t, 3)
+	m = clickHistory(t, m, 1)
+	m = enter(t, typeText(t, m, ":seq 7"))
+	if _, next := m.w.Status(); next != 7 {
+		t.Errorf("next seq = %d, want 7", next)
+	}
+	if m.selected != 1 {
+		t.Errorf("selected = %d, want 1（コマンドでは選択を解除しない）", m.selected)
+	}
+}
+
+// 選択中でも画面の行数は変わらない。
+func TestViewHeightWithSelection(t *testing.T) {
+	m := withHistory(t, 5)
+	want := len(strings.Split(m.View(), "\n"))
+	m = clickHistory(t, m, 3)
+	m = typeText(t, m, "02")
+	if got := len(strings.Split(m.View(), "\n")); got != want {
+		t.Errorf("選択中の View は %d 行、want %d 行", got, want)
+	}
+}
+
+// 選択中に新しいファイルが来ても、選択の一番古い側が外れない。
+// 選択は「この行から最新まで」なので、新着はそのまま範囲に入る。
+func TestSelectionSurvivesNewArrivals(t *testing.T) {
+	m := withHistory(t, 3) // 新しい順に a2, a1, a0
+	m = clickHistory(t, m, 1)
+	oldest := m.history[m.selected]
+
+	m, _ = update(t, m, pollMsg{results: []Rename{
+		{Old: "b0.png", New: "01_04_b0.png"},
+		{Old: "b1.png", New: "01_05_b1.png"},
+	}})
+
+	if got := m.history[m.selected]; got != oldest {
+		t.Errorf("選択の一番古い側 = %+v, want %+v", got, oldest)
+	}
+	if m.selectedCount() != 4 {
+		t.Errorf("selectedCount = %d, want 4（元の2件 + 新着2件）", m.selectedCount())
+	}
+	if m.history[0].New != "01_05_b1.png" {
+		t.Fatalf("history[0] = %q, want 新着", m.history[0].New)
+	}
+}
+
+// 履歴が上限で切り詰められても選択が範囲外を指さない。
+func TestSelectionStaysInRangeWhenHistoryIsCapped(t *testing.T) {
+	m := withHistory(t, 3)
+	m = clickHistory(t, m, 2)
+
+	results := make([]Rename, historyMax)
+	for i := range results {
+		results[i] = Rename{Old: fmt.Sprintf("b%d.png", i), New: fmt.Sprintf("01_%d_b%d.png", i, i)}
+	}
+	m, _ = update(t, m, pollMsg{results: results})
+
+	if m.selected > len(m.history)-1 {
+		t.Errorf("selected = %d, history = %d 件（範囲外）", m.selected, len(m.history))
+	}
+	// 範囲外を指していなければ View も落ちない
+	if got := len(strings.Split(m.View(), "\n")); got != m.height {
+		t.Errorf("View は %d 行、want %d 行", got, m.height)
+	}
+}

@@ -397,3 +397,142 @@ func countUnrenamed(t *testing.T, dir string) int {
 	}
 	return n
 }
+
+// reversed は Poll の結果（古い順）を履歴の並び（新しい順）にする。
+func reversed(rs []Rename) []Rename {
+	out := make([]Rename, 0, len(rs))
+	for i := len(rs) - 1; i >= 0; i-- {
+		out = append(out, rs[i])
+	}
+	return out
+}
+
+// 付け替えで連番が 1 から振り直されることを確認。
+func TestRetagRenumbersFromOne(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	createFile(t, dir, "b.png")
+	createFile(t, dir, "c.png")
+	results, err := w.Poll()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 新しい順の 2 件（c, b）だけを 02 に付け替える
+	items := reversed(results)[:2]
+	updated, renamed, errs := w.Retag(items, "02")
+	if renamed != 2 || len(errs) != 0 {
+		t.Fatalf("renamed=%d errs=%v, want 2 / なし", renamed, errs)
+	}
+	// 古い方から 01, 02 と振り直す（items は新しい順なので末尾が 01）
+	if updated[1].New != "02_01_b.png" || updated[0].New != "02_02_c.png" {
+		t.Errorf("updated = [%q %q], want [02_02_c.png 02_01_b.png]", updated[0].New, updated[1].New)
+	}
+	for _, want := range []string{"01_01_a.png", "02_01_b.png", "02_02_c.png"} {
+		if !fileExists(dir, want) {
+			t.Errorf("%s が無い: %v", want, dirNames(t, dir))
+		}
+	}
+	// 元の名前は残っていない
+	for _, gone := range []string{"01_02_b.png", "01_03_c.png"} {
+		if fileExists(dir, gone) {
+			t.Errorf("%s が残っている: %v", gone, dirNames(t, dir))
+		}
+	}
+}
+
+// 付け替えたファイルは既知扱いになり、次の Poll でリネームし直されない。
+func TestRetagMarksResultKnown(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	results, _ := w.Poll()
+	w.Retag(reversed(results), "02")
+
+	before := dirNames(t, dir)
+	again, err := w.Poll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := Renamed(again); n != 0 {
+		t.Errorf("再ポーリングで %d 件リネームされた、want 0", n)
+	}
+	if got := dirNames(t, dir); strings.Join(got, ",") != strings.Join(before, ",") {
+		t.Errorf("ファイル一覧が変わった: %v → %v", before, got)
+	}
+}
+
+// リネームに失敗していた要素（Err 付き）は付け替えの対象外。
+func TestRetagSkipsFailedEntries(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	results, _ := w.Poll()
+
+	items := append(reversed(results), Rename{Old: "locked.png", Err: fmt.Errorf("permission denied")})
+	updated, renamed, errs := w.Retag(items, "02")
+	if renamed != 1 || len(errs) != 0 {
+		t.Fatalf("renamed=%d errs=%v, want 1 / なし", renamed, errs)
+	}
+	if updated[0].New != "02_01_a.png" {
+		t.Errorf("updated[0].New = %q, want 02_01_a.png", updated[0].New)
+	}
+	if updated[1].New != "" || updated[1].Err == nil {
+		t.Errorf("失敗していた要素が書き換わった: %+v", updated[1])
+	}
+}
+
+// 付け替え先に同名ファイルがある場合は (1) を付けて衝突を避ける。
+func TestRetagWithCollision(t *testing.T) {
+	dir := t.TempDir()
+	createFile(t, dir, "02_01_a.png")
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	results, _ := w.Poll()
+
+	updated, renamed, errs := w.Retag(reversed(results), "02")
+	if renamed != 1 || len(errs) != 0 {
+		t.Fatalf("renamed=%d errs=%v, want 1 / なし", renamed, errs)
+	}
+	if updated[0].New != "02_01_a (1).png" {
+		t.Errorf("updated[0].New = %q, want 02_01_a (1).png (%v)", updated[0].New, dirNames(t, dir))
+	}
+}
+
+// ファイルが消えていた1件だけを失敗として飛ばし、残りは付け替える。
+func TestRetagReportsMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	createFile(t, dir, "b.png")
+	results, _ := w.Poll()
+	items := reversed(results)
+
+	// 古い方（a）を手で消してしまった状況
+	if err := os.Remove(filepath.Join(dir, "01_01_a.png")); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, renamed, errs := w.Retag(items, "02")
+	if renamed != 1 {
+		t.Errorf("renamed = %d, want 1", renamed)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("errs = %v, want 1件", errs)
+	}
+	// 残った b は 01 番から振られる（欠番にしない）
+	if updated[0].New != "02_01_b.png" {
+		t.Errorf("updated[0].New = %q, want 02_01_b.png", updated[0].New)
+	}
+}
