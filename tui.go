@@ -313,7 +313,6 @@ func (m tuiModel) renderButton(i int) string {
 }
 
 func (m tuiModel) View() string {
-	var b strings.Builder
 	pad := strings.Repeat(" ", indent)
 
 	state := okStyle.Render("● 監視中")
@@ -321,33 +320,47 @@ func (m tuiModel) View() string {
 		state = pausedStyle.Render("‖ 一時停止")
 	}
 	prefix, nextSeq := m.w.Status()
-
-	fmt.Fprintf(&b, "%s%s    %s    %s\n", pad, titleStyle.Render("capture-renamer"), m.folder, state)
-	// buttonX と桁がずれないよう、prefix 行はこの順・この隙間で組み立てる
 	gap := strings.Repeat(" ", buttonGap)
-	fmt.Fprintf(&b, "%s%s%s%s%s%s%s     次の連番: %02d    間隔: %v\n\n",
-		pad, prefixLabel,
-		m.renderButton(0), gap, titleStyle.Render(prefix), gap, m.renderButton(1),
-		nextSeq, m.interval)
-	fmt.Fprintf(&b, "%s%s\n", pad, dimStyle.Render(fmt.Sprintf("履歴 (%d)", len(m.history))))
 
-	rows := m.historyRows()
-	for i := 0; i < rows; i++ {
+	lines := make([]string, 0, m.height)
+	lines = append(lines,
+		fmt.Sprintf("%s%s    %s    %s", pad, titleStyle.Render("capture-renamer"), m.folder, state),
+		// buttonX と桁がずれないよう、prefix 行はこの順・この隙間で組み立てる
+		fmt.Sprintf("%s%s%s%s%s%s%s     次の連番: %02d    間隔: %v",
+			pad, prefixLabel,
+			m.renderButton(0), gap, titleStyle.Render(prefix), gap, m.renderButton(1),
+			nextSeq, m.interval),
+		"",
+		pad+dimStyle.Render(fmt.Sprintf("履歴 (%d)", len(m.history))),
+	)
+
+	for i := 0; i < m.historyRows(); i++ {
 		if i >= len(m.history) {
-			b.WriteString("\n") // 余った行も空行で埋めて View の行数を一定に保つ
+			lines = append(lines, "") // 余った行も空行で埋めて行数を一定に保つ
 			continue
 		}
-		b.WriteString(pad + renameLine(m.history[i]) + "\n")
+		lines = append(lines, pad+renameLine(m.history[i]))
 	}
 
 	msg := m.message
 	if m.isErr && msg != "" {
 		msg = errStyle.Render(msg)
 	}
-	fmt.Fprintf(&b, "\n%s%s\n", pad, msg)
-	fmt.Fprintf(&b, "%s新しい prefix> %s_\n", pad, m.input)
-	fmt.Fprintf(&b, "%s%s\n", pad, dimStyle.Render("[ - ]/[ + ] クリックで番号送り   Enter 確定   :seq N 連番指定   Ctrl+U 消去   Ctrl+P 停止   Ctrl+C 終了"))
-	return b.String()
+	lines = append(lines,
+		"",
+		pad+msg,
+		fmt.Sprintf("%s新しい prefix> %s_", pad, m.input),
+		pad+dimStyle.Render("[ - ]/[ + ] クリックで番号送り   Enter 確定   :seq N 連番指定   Ctrl+U 消去   Ctrl+P 停止   Ctrl+C 終了"),
+	)
+
+	// 端末より高いフレームを返すと Bubble Tea が「上から」行を捨てるため
+	// (standard_renderer.go の flush)、全部の行番号が上にずれてボタンの当たり判定が
+	// 狂う。末尾に改行を足さないこと、行数を端末の高さ以内に収めることの両方が必要。
+	// 高さが足りない時は下を切って、上の行の位置を守る。
+	if len(lines) > m.height {
+		lines = lines[:m.height]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // runTUI は TUI モードで監視を実行する。

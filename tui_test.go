@@ -507,3 +507,52 @@ func TestButtonLayoutMatchesView(t *testing.T) {
 		}
 	}
 }
+
+// View は端末の高さと同じ行数を、末尾の改行なしで返す。
+//
+// Bubble Tea の標準レンダラはフレームが端末より高いと「上から」行を捨てるため
+// (standard_renderer.go の flush)、1行でも多いと全部の行番号がずれ、ボタンの
+// 当たり判定がマウスの位置と合わなくなる。
+func TestViewFitsTerminalHeight(t *testing.T) {
+	for _, height := range []int{3, 8, 9, 10, 24, 50} {
+		for _, entries := range []int{0, 2, 1000} {
+			m, _ := newTestTUI(t)
+			m, _ = update(t, m, tea.WindowSizeMsg{Width: 80, Height: height})
+			results := make([]Rename, entries)
+			for i := range results {
+				results[i] = Rename{Old: fmt.Sprintf("%d.png", i), New: fmt.Sprintf("01_%d.png", i)}
+			}
+			m, _ = update(t, m, pollMsg{results: results})
+
+			view := m.View()
+			if got := len(strings.Split(view, "\n")); got != height {
+				t.Errorf("height=%d entries=%d: View は %d 行、want %d 行", height, entries, got, height)
+			}
+			// フレームが収まる高さでは、最後の行はヘルプ行（末尾に余計な改行が無い）
+			if height >= 9 && !strings.Contains(lastLine(plainView(m)), "Ctrl+C 終了") {
+				t.Errorf("height=%d entries=%d: 最終行 = %q, want ヘルプ行", height, entries, lastLine(plainView(m)))
+			}
+		}
+	}
+}
+
+// 画面の1行目はタイトル行、2行目はボタンのある prefix 行。
+// この2つがずれると MouseMsg.Y と当たり判定が食い違う。
+func TestViewRowOrder(t *testing.T) {
+	m, _ := newTestTUI(t)
+	m, _ = update(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	lines := strings.Split(plainView(m), "\n")
+
+	if !strings.Contains(lines[0], "capture-renamer") {
+		t.Errorf("1行目 = %q, want タイトル行", lines[0])
+	}
+	if !strings.Contains(lines[prefixRow], prefixButtons[0].label) {
+		t.Errorf("%d 行目 = %q, want ボタンのある prefix 行", prefixRow, lines[prefixRow])
+	}
+}
+
+// lastLine は文字列の最後の行を返す。
+func lastLine(s string) string {
+	lines := strings.Split(s, "\n")
+	return lines[len(lines)-1]
+}
