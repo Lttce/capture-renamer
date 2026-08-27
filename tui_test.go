@@ -934,3 +934,41 @@ func TestNextNamePreview(t *testing.T) {
 		t.Errorf("リネーム後の見本が違う:\n%s", plainView(m))
 	}
 }
+
+// 表示範囲より下に押し出された行の選択は外れる。
+// `▸` が見えないまま「N selected」だけが残り、prefix の切り替えのつもりで
+// 見えないファイルを付け替えてしまうのを防ぐため。
+func TestSelectionDroppedWhenScrolledOutOfView(t *testing.T) {
+	m := withHistory(t, 3)
+	m.height = headerRows + tuiFooter + 3 // 履歴は3行だけ見える
+	m = clickHistory(t, m, 2)
+	if m.selectedCount() != 1 {
+		t.Fatalf("selectedCount = %d, want 1", m.selectedCount())
+	}
+
+	// 新しいファイルが1件来ると、選んだ行は4行目に押し出されて見えなくなる
+	m, _ = update(t, m, pollMsg{results: []Rename{{Old: "b.png", New: "01_04_b.png"}}})
+	if m.selectedCount() != 0 {
+		t.Errorf("selectedCount = %d, want 0（見えない行の選択は外す）", m.selectedCount())
+	}
+}
+
+// フォルダが読めるようになったらそのエラー通知だけを消す。
+func TestFolderErrorClearsOnSuccess(t *testing.T) {
+	m, _ := newTestTUI(t)
+	m, _ = update(t, m, pollMsg{err: fmt.Errorf("no such directory")})
+	if !m.isErr || !strings.Contains(m.message, folderErrPrefix) {
+		t.Fatalf("message = %q (isErr=%v), want フォルダのエラー", m.message, m.isErr)
+	}
+	m, _ = update(t, m, pollMsg{})
+	if m.message != "" || m.isErr {
+		t.Errorf("message = %q (isErr=%v), want 空", m.message, m.isErr)
+	}
+
+	// 付け替えの通知は次のポーリングで消さない
+	m.message, m.isErr = "could not rename 01_01_a.png", true
+	m, _ = update(t, m, pollMsg{})
+	if m.message == "" {
+		t.Error("付け替えの通知がポーリングで消えた")
+	}
+}

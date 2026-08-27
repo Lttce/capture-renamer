@@ -27,6 +27,10 @@ const (
 	minHeight  = 10  // WindowSizeMsg が来る前に使う仮の高さ
 )
 
+// folderErrPrefix はフォルダが読めなかった時の通知の先頭。
+// 読めるようになった時にこの通知だけを消すため、判定にも使う。
+const folderErrPrefix = "cannot read folder"
+
 // sampleName は next の見本に使う、元ファイル名の代わりの文字列。
 // 実際にはここに撮影されたファイル名が入る。
 const sampleName = "image.png"
@@ -212,6 +216,22 @@ func (m tuiModel) toggleSelection(i int) tuiModel {
 	return m
 }
 
+// dropHiddenSelection は画面に出ていない行の選択を外す。
+//
+// 新しいファイルが増えて選択行が表示範囲より下に押し出されると、`▸` が見えないまま
+// 「N selected」だけが残る。その状態で prefix を入れて Enter を押すと、prefix の
+// 切り替えではなく見えないファイルの付け替えが起きてしまうため、ここで外す。
+func (m tuiModel) dropHiddenSelection() tuiModel {
+	rows := m.historyRows()
+	hist := make([]histItem, len(m.history))
+	copy(hist, m.history)
+	for i := rows; i < len(hist); i++ {
+		hist[i].sel = false
+	}
+	m.history = hist
+	return m
+}
+
 // clearSelection は選択を全て外す。
 func (m tuiModel) clearSelection() tuiModel {
 	hist := make([]histItem, len(m.history))
@@ -241,7 +261,9 @@ func (m tuiModel) Init() tea.Cmd {
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// 縮んで見えなくなった行の選択も外す（dropHiddenSelection のコメント参照）
 		m.height = msg.Height
+		m = m.dropHiddenSelection()
 
 	case tickMsg:
 		// 一時停止中や前回の Poll が終わっていない間は、次のティックだけ入れて見送る。
@@ -254,8 +276,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pollMsg:
 		m.polling = false
 		if msg.err != nil {
-			m.message, m.isErr = fmt.Sprintf("cannot read folder: %v", msg.err), true
+			m.message, m.isErr = fmt.Sprintf("%s: %v", folderErrPrefix, msg.err), true
 			return m, nil
+		}
+		// 読めるようになったら、その通知だけを消す。他の通知（付け替え結果など）は
+		// 次のポーリングで消えてしまわないよう残す。
+		if strings.HasPrefix(m.message, folderErrPrefix) {
+			m.message, m.isErr = "", false
 		}
 		// 新しいものが上に来るよう、今回の結果を反転して履歴の先頭に積む
 		// (Poll は ReadDir 順 = 連番の若い順に返す)
@@ -267,6 +294,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.history) > historyMax {
 			m.history = m.history[:historyMax]
 		}
+		m = m.dropHiddenSelection()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -347,10 +375,11 @@ func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // `:` 始まりはコマンド、履歴を選択中なら付け替え、それ以外は prefix の切り替え。
 func (m tuiModel) applyInput() tuiModel {
 	input := strings.TrimSpace(m.input)
+	m.input = ""
 	if input == "" {
+		// 空白だけの入力は何もしない（入力欄は空に戻す）
 		return m
 	}
-	m.input = ""
 
 	if after, ok := strings.CutPrefix(input, ":"); ok {
 		return m.runCommand(strings.Fields(after))
@@ -385,10 +414,17 @@ func (m tuiModel) retag(prefix string) tuiModel {
 
 	updated, renamed, failed := m.w.Retag(items, prefix)
 
+	// 付け替えに失敗した行は選択を残す。原因を直してもう一度 Enter を押すだけで
+	// 再試行できるようにするため（成功した行は選択を外す）。
+	stillSelected := make(map[string]bool, len(failed))
+	for _, name := range failed {
+		stillSelected[name] = true
+	}
+
 	hist := make([]histItem, len(m.history))
 	copy(hist, m.history)
 	for i, h := range idx {
-		hist[h] = histItem{Rename: updated[i]}
+		hist[h] = histItem{Rename: updated[i], sel: stillSelected[m.history[h].New]}
 	}
 	m.history = hist
 
