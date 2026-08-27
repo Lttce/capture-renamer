@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 const testInterval = 10 * time.Millisecond
@@ -350,5 +351,159 @@ func TestInitSchedulesTick(t *testing.T) {
 	}
 	if _, ok := cmd().(tickMsg); !ok {
 		t.Errorf("cmd() = %T, want tickMsg", cmd())
+	}
+}
+
+func TestBumpPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		in    string
+		delta int
+		want  string
+	}{
+		{"01", +1, "02"},
+		{"09", +1, "10"},
+		{"099", +1, "100"},
+		{"99", +1, "100"}, // 桁が増えるときは埋めた幅を超える
+		{"1", +1, "2"},
+		{"02", -1, "01"},
+		{"10", -1, "09"},
+		{"100", -1, "099"},
+		{"case01", +1, "case02"},
+		{"case09", +1, "case10"},
+		{"test", +1, "test01"}, // 末尾に数字が無ければ 01 を付ける
+	} {
+		got, err := bumpPrefix(tc.in, tc.delta)
+		if err != nil {
+			t.Errorf("bumpPrefix(%q, %d): %v", tc.in, tc.delta, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("bumpPrefix(%q, %d) = %q, want %q", tc.in, tc.delta, got, tc.want)
+		}
+	}
+}
+
+func TestBumpPrefixErrors(t *testing.T) {
+	for _, tc := range []struct{ in string }{{"01"}, {"1"}, {"case01"}} {
+		if got, err := bumpPrefix(tc.in, -1); err == nil {
+			t.Errorf("bumpPrefix(%q, -1) = %q, want an error (1 より下には減らさない)", tc.in, got)
+		}
+	}
+	if got, err := bumpPrefix("test", -1); err == nil {
+		t.Errorf("bumpPrefix(\"test\", -1) = %q, want an error (減らせる数字がない)", got)
+	}
+}
+
+// ボタンのクリックで prefix が増減し、連番がリセットされる。
+func TestButtonClickBumpsPrefix(t *testing.T) {
+	m, _ := newTestTUI(t)
+	m.w.SetPrefix("01")
+	m.w.SetCounter(9)
+
+	m = clickButton(t, m, 1) // [ + ]
+	if prefix, next := m.w.Status(); prefix != "02" || next != 1 {
+		t.Errorf("after [ + ]: prefix=%q next=%d, want 02 / 1", prefix, next)
+	}
+	m = clickButton(t, m, 0) // [ - ]
+	if prefix, _ := m.w.Status(); prefix != "01" {
+		t.Errorf("after [ - ]: prefix=%q, want 01", prefix)
+	}
+	// 01 からは減らせないので、prefix はそのままでエラーメッセージが出る
+	m = clickButton(t, m, 0)
+	if prefix, _ := m.w.Status(); prefix != "01" {
+		t.Errorf("prefix = %q, want 01 (unchanged)", prefix)
+	}
+	if !m.isErr || m.message == "" {
+		t.Errorf("expected an error message, got %q (isErr=%v)", m.message, m.isErr)
+	}
+}
+
+// clickButton は i 番目のボタンの左端を左クリックする。
+func clickButton(t *testing.T, m tuiModel, i int) tuiModel {
+	t.Helper()
+	prefix, _ := m.w.Status()
+	m, _ = update(t, m, tea.MouseMsg{
+		X:      buttonX(i, prefix),
+		Y:      prefixRow,
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+	})
+	return m
+}
+
+func TestClickOutsideButtonsDoesNothing(t *testing.T) {
+	m, _ := newTestTUI(t)
+	m.w.SetPrefix("01")
+	prefix, _ := m.w.Status()
+
+	for _, pos := range []struct {
+		name string
+		x, y int
+	}{
+		{"左余白", 0, prefixRow},
+		{"ボタンの1桁左", buttonX(0, prefix) - 1, prefixRow},
+		{"prefix 自体", buttonX(0, prefix) + len(prefixButtons[0].label) + buttonGap, prefixRow},
+		{"別の行", buttonX(1, prefix), prefixRow + 1},
+	} {
+		got, _ := update(t, m, tea.MouseMsg{X: pos.x, Y: pos.y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+		if p, _ := got.w.Status(); p != "01" {
+			t.Errorf("%s のクリックで prefix が %q になった、want 01", pos.name, p)
+		}
+		if got.hover != -1 {
+			t.Errorf("%s: hover = %d, want -1", pos.name, got.hover)
+		}
+	}
+}
+
+func TestHoverHighlightsButton(t *testing.T) {
+	m, _ := newTestTUI(t)
+	m.w.SetPrefix("01")
+	prefix, _ := m.w.Status()
+
+	m, _ = update(t, m, tea.MouseMsg{X: buttonX(1, prefix), Y: prefixRow, Action: tea.MouseActionMotion})
+	if m.hover != 1 {
+		t.Fatalf("hover = %d, want 1", m.hover)
+	}
+	if !strings.Contains(m.View(), hoverStyle.Render(prefixButtons[1].label)) {
+		t.Error("ホバー中のボタンが反転していない")
+	}
+	// ボタンから外れたら反転も外れる
+	m, _ = update(t, m, tea.MouseMsg{X: 0, Y: prefixRow, Action: tea.MouseActionMotion})
+	if m.hover != -1 {
+		t.Errorf("hover = %d, want -1", m.hover)
+	}
+}
+
+// View 上のボタンの桁が buttonX と一致していること（当たり判定の要）。
+// prefix の幅が変わっても [ + ] の位置が追従することを確かめる。
+func TestButtonLayoutMatchesView(t *testing.T) {
+	for _, prefix := range []string{"01", "099", "test", "case01", "日本語01"} {
+		m, _ := newTestTUI(t)
+		m.w.SetPrefix(prefix)
+
+		lines := strings.Split(plainView(m), "\n")
+		if len(lines) <= prefixRow {
+			t.Fatalf("View has %d lines, want > %d", len(lines), prefixRow)
+		}
+		row := lines[prefixRow]
+		for i, b := range prefixButtons {
+			// strings.Index はバイト位置なので、表示桁 (= MouseMsg.X の単位) に換算する
+			col := lipgloss.Width(row[:strings.Index(row, b.label)])
+			if col != buttonX(i, prefix) {
+				t.Errorf("prefix=%q: %s は View の %d 桁目、buttonX(%d) = %d (row=%q)",
+					prefix, b.label, col, i, buttonX(i, prefix), row)
+			}
+			if got := buttonAt(col, prefixRow, prefix); got != i {
+				t.Errorf("prefix=%q: buttonAt(%d) = %d, want %d", prefix, col, got, i)
+			}
+			// ボタンの右端の1桁も当たる／その1桁外は当たらない
+			last := col + len(b.label) - 1
+			if got := buttonAt(last, prefixRow, prefix); got != i {
+				t.Errorf("prefix=%q: buttonAt(%d) = %d, want %d (右端)", prefix, last, got, i)
+			}
+			if got := buttonAt(last+1, prefixRow, prefix); got == i {
+				t.Errorf("prefix=%q: buttonAt(%d) がまだ %d に当たっている", prefix, last+1, i)
+			}
+		}
 	}
 }

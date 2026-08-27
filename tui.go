@@ -27,8 +27,80 @@ const (
 	minHeight  = 10  // WindowSizeMsg が来る前に使う仮の高さ
 )
 
+// prefix 行のボタンのレイアウト。View と当たり判定 (buttonAt) の両方がここを参照する。
+//
+// 当たり判定は altscreen 前提。altscreen が無いと View は端末の途中から描画されるのに
+// MouseMsg.Y は端末全体の行番号になり、座標が常にズレる（runTUI の WithAltScreen 参照）。
+const (
+	prefixRow   = 1          // prefix 行は View の2行目（0 始まり）
+	prefixLabel = "prefix: " // ボタンの開始桁を決めるので固定文字列にしておく
+	buttonGap   = 1          // ボタンと prefix の間の隙間
+)
+
+// prefixButtons は prefix 末尾の数字を増減するボタン。
+// 画面には [ - ] prefix [ + ] の順に並ぶ。
+var prefixButtons = []struct {
+	label string
+	delta int
+}{
+	{"[ - ]", -1},
+	{"[ + ]", +1},
+}
+
+// buttonX は i 番目のボタンの開始桁を返す。
+// [ + ] は prefix の右側にあるため、位置は現在の prefix の表示幅で決まる。
+func buttonX(i int, prefix string) int {
+	x := indent + len(prefixLabel)
+	if i == 0 {
+		return x
+	}
+	return x + len(prefixButtons[0].label) + buttonGap + lipgloss.Width(prefix) + buttonGap
+}
+
+// buttonAt は (x, y) 上のボタン番号を返す。無ければ -1。
+func buttonAt(x, y int, prefix string) int {
+	if y != prefixRow {
+		return -1
+	}
+	for i, b := range prefixButtons {
+		if start := buttonX(i, prefix); x >= start && x < start+len(b.label) {
+			return i
+		}
+	}
+	return -1
+}
+
+// bumpPrefix は prefix 末尾の数字を delta だけ動かした文字列を返す。
+// ゼロ埋めの桁数は保つ（01 → 02、09 → 10、099 → 100）。
+// 末尾が数字でなければ 01 を付ける（case → case01）。1 より下には減らさない。
+func bumpPrefix(p string, delta int) (string, error) {
+	i := len(p)
+	for i > 0 && p[i-1] >= '0' && p[i-1] <= '9' {
+		i--
+	}
+	stem, digits := p[:i], p[i:]
+
+	if digits == "" {
+		if delta < 0 {
+			return "", fmt.Errorf("%q には減らせる数字がありません", p)
+		}
+		return p + "01", nil
+	}
+
+	n, err := strconv.Atoi(digits)
+	if err != nil {
+		return "", fmt.Errorf("%q の数字が大きすぎます", p)
+	}
+	n += delta
+	if n < 1 {
+		return "", fmt.Errorf("これ以上減らせません")
+	}
+	return fmt.Sprintf("%s%0*d", stem, len(digits), n), nil
+}
+
 var (
 	titleStyle  = lipgloss.NewStyle().Bold(true)
+	hoverStyle  = lipgloss.NewStyle().Reverse(true)
 	dimStyle    = lipgloss.NewStyle().Faint(true)
 	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
@@ -55,11 +127,12 @@ type tuiModel struct {
 	isErr   bool     // message がエラーか
 	paused  bool
 	polling bool // Poll が実行中（重複起動を防ぐ）
+	hover   int  // マウスが乗っているボタン番号、無ければ -1
 	height  int
 }
 
 func newTUIModel(w *Watcher, folder string, interval time.Duration) tuiModel {
-	return tuiModel{w: w, folder: folder, interval: interval, height: minHeight}
+	return tuiModel{w: w, folder: folder, interval: interval, height: minHeight, hover: -1}
 }
 
 // historyRows は履歴に使える行数。
@@ -118,8 +191,35 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	}
 	return m, nil
+}
+
+// handleMouse は prefix 増減ボタンのホバーとクリックを処理する。
+func (m tuiModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	prefix, _ := m.w.Status()
+	i := buttonAt(msg.X, msg.Y, prefix)
+	m.hover = i
+	if i >= 0 && msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+		return m.bump(prefixButtons[i].delta), nil
+	}
+	return m, nil
+}
+
+// bump は prefix 末尾の数字を delta だけ動かす。連番は SetPrefix でリセットされる。
+func (m tuiModel) bump(delta int) tuiModel {
+	prefix, _ := m.w.Status()
+	next, err := bumpPrefix(prefix, delta)
+	if err != nil {
+		m.message, m.isErr = err.Error(), true
+		return m
+	}
+	m.w.SetPrefix(next)
+	m.message, m.isErr = fmt.Sprintf("prefix を %q に変更、連番をリセット", next), false
+	return m
 }
 
 func (m tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -204,6 +304,14 @@ func renameLine(r Rename) string {
 	return fmt.Sprintf("%s  %s", r.New, dimStyle.Render("← "+r.Old))
 }
 
+// renderButton は i 番目のボタンを描く。マウスが乗っていれば反転させる。
+func (m tuiModel) renderButton(i int) string {
+	if i == m.hover {
+		return hoverStyle.Render(prefixButtons[i].label)
+	}
+	return prefixButtons[i].label
+}
+
 func (m tuiModel) View() string {
 	var b strings.Builder
 	pad := strings.Repeat(" ", indent)
@@ -215,7 +323,12 @@ func (m tuiModel) View() string {
 	prefix, nextSeq := m.w.Status()
 
 	fmt.Fprintf(&b, "%s%s    %s    %s\n", pad, titleStyle.Render("capture-renamer"), m.folder, state)
-	fmt.Fprintf(&b, "%sprefix: %s     次の連番: %02d    間隔: %v\n\n", pad, titleStyle.Render(prefix), nextSeq, m.interval)
+	// buttonX と桁がずれないよう、prefix 行はこの順・この隙間で組み立てる
+	gap := strings.Repeat(" ", buttonGap)
+	fmt.Fprintf(&b, "%s%s%s%s%s%s%s     次の連番: %02d    間隔: %v\n\n",
+		pad, prefixLabel,
+		m.renderButton(0), gap, titleStyle.Render(prefix), gap, m.renderButton(1),
+		nextSeq, m.interval)
 	fmt.Fprintf(&b, "%s%s\n", pad, dimStyle.Render(fmt.Sprintf("履歴 (%d)", len(m.history))))
 
 	rows := m.historyRows()
@@ -233,13 +346,15 @@ func (m tuiModel) View() string {
 	}
 	fmt.Fprintf(&b, "\n%s%s\n", pad, msg)
 	fmt.Fprintf(&b, "%s新しい prefix> %s_\n", pad, m.input)
-	fmt.Fprintf(&b, "%s%s\n", pad, dimStyle.Render("Enter 確定   :seq N 連番指定   Ctrl+U 消去   Ctrl+P 一時停止   Ctrl+C 終了"))
+	fmt.Fprintf(&b, "%s%s\n", pad, dimStyle.Render("[ - ]/[ + ] クリックで番号送り   Enter 確定   :seq N 連番指定   Ctrl+U 消去   Ctrl+P 停止   Ctrl+C 終了"))
 	return b.String()
 }
 
 // runTUI は TUI モードで監視を実行する。
 func runTUI(w *Watcher, folder string, interval time.Duration) error {
-	p := tea.NewProgram(newTUIModel(w, folder, interval), tea.WithAltScreen())
+	// WithAltScreen はボタンの当たり判定に必須（buttonAt のコメント参照）。
+	// ホバー反転にはモーション通知が要るので WithMouseAllMotion を使う。
+	p := tea.NewProgram(newTUIModel(w, folder, interval), tea.WithAltScreen(), tea.WithMouseAllMotion())
 	_, err := p.Run()
 	return err
 }
