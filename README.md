@@ -18,12 +18,20 @@ capture-renamer
 
 画面（TUI）が開き、監視状態とリネーム履歴が表示されます。
 
-画面の表示は英語です（`next` = 次の連番、`interval` = チェック間隔、
-`history` = リネーム履歴、`● watching` = 監視中 / `‖ paused` = 一時停止）。
+画面の表示は英語です。
+
+| 表示 | 意味 |
+|---|---|
+| `next` | 次に付く連番 |
+| `preview` | 次に付く名前の見本。`image.png` の部分が実際に撮影されたファイル名になります |
+| `interval` | チェック間隔 |
+| `history` | リネームした履歴（新しい順） |
+| `● watching` / `‖ paused` | 監視中 / 一時停止中 |
 
 ```
   capture-renamer    ./capture    ● watching
   prefix: [ - ] 01 [ + ]     next: 03    interval: 300ms
+  preview: 01_03_image.png
   prefix> _
 
   history (2)
@@ -51,6 +59,7 @@ capture-renamer
 
 ```
   prefix: [ - ] 01 [ + ]     next: 06    interval: 300ms
+  preview: 01_06_image.png
   prefix (2 selected)> 02_
 
   history (5)
