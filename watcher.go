@@ -221,15 +221,15 @@ func (w *Watcher) Poll() ([]Rename, error) {
 // items は新しい順（先頭が最新）で渡す。連番は古い順に 1 から振り直すので、
 // items の並び順がそのまま新しい連番の順になる。
 // 戻り値は items と同じ順・同じ長さの一覧（付け替えに成功した分は New が新しい
-// 名前に変わる）、付け替えた件数、失敗の理由。
+// 名前に変わる）、付け替えた件数、付け替えられなかったファイル名。
 //
 // 元々リネームに失敗している要素（Err 付き）は対象外。ファイルが既に消えていた
 // 場合などは、その1件だけを失敗として飛ばし、残りは処理を続ける。
-func (w *Watcher) Retag(items []Rename, prefix string) ([]Rename, int, []error) {
+func (w *Watcher) Retag(items []Rename, prefix string) ([]Rename, int, []string) {
 	updated := make([]Rename, len(items))
 	copy(updated, items)
 
-	var errs []error
+	var failed []string
 	seq := 1
 	// 古い順（末尾）から連番を振り直す
 	for i := len(items) - 1; i >= 0; i-- {
@@ -241,7 +241,7 @@ func (w *Watcher) Retag(items []Rename, prefix string) ([]Rename, int, []error) 
 		newName := fmt.Sprintf("%s_%02d_%s", prefix, seq, r.Old)
 		newPath := uniqueNewName(filepath.Join(w.folder, newName))
 		if err := os.Rename(filepath.Join(w.folder, r.New), newPath); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", r.New, err))
+			failed = append(failed, r.New)
 			continue
 		}
 
@@ -250,7 +250,7 @@ func (w *Watcher) Retag(items []Rename, prefix string) ([]Rename, int, []error) 
 		updated[i].New = base
 		seq++
 	}
-	return updated, seq - 1, errs
+	return updated, seq - 1, failed
 }
 
 // Renamed は成功したリネームの件数を返す。

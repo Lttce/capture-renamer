@@ -76,8 +76,12 @@ func TestEnterChangesPrefixAndResetsCounter(t *testing.T) {
 	if m.input != "" {
 		t.Errorf("input = %q, want cleared", m.input)
 	}
-	if m.isErr || !strings.Contains(m.message, "shot01") {
-		t.Errorf("message = %q (isErr=%v), want a notice mentioning shot01", m.message, m.isErr)
+	// 成功時はメッセージを出さない（新しい prefix はヘッダに出る）
+	if m.message != "" {
+		t.Errorf("message = %q, want 空", m.message)
+	}
+	if !strings.Contains(plainView(m), "shot01") {
+		t.Errorf("ヘッダに新しい prefix が出ていない:\n%s", plainView(m))
 	}
 }
 
@@ -702,8 +706,8 @@ func TestRetagMiddleKeepsCurrentPrefix(t *testing.T) {
 	if prefix != "01" || next != 4 {
 		t.Errorf("prefix=%q next=%d, want 01 / 4（撮影中の prefix は据え置き）", prefix, next)
 	}
-	if !strings.Contains(m.message, "のまま") {
-		t.Errorf("message = %q, want 撮影中の prefix が変わらない旨の通知", m.message)
+	if !strings.Contains(m.message, "1 件") {
+		t.Errorf("message = %q, want 付け替えた件数の通知", m.message)
 	}
 }
 
@@ -818,5 +822,83 @@ func TestSelectionDroppedWhenHistoryIsCapped(t *testing.T) {
 	}
 	if got := len(strings.Split(m.View(), "\n")); got != m.height {
 		t.Errorf("View は %d 行、want %d 行", got, m.height)
+	}
+}
+
+// うまくいった操作ではメッセージを出さない。
+// prefix・連番・停止中かどうかはヘッダに、選択件数は入力欄の見出しに出るので、
+// 同じことをメッセージ行で繰り返さない。
+func TestSuccessfulActionsStayQuiet(t *testing.T) {
+	base, _ := newTestTUI(t)
+	base.w.SetPrefix("01")
+
+	for _, tc := range []struct {
+		name string
+		do   func(m tuiModel) tuiModel
+	}{
+		{"prefix 切替", func(m tuiModel) tuiModel { return enter(t, typeText(t, m, "case01")) }},
+		{"番号送り [ + ]", func(m tuiModel) tuiModel { return clickButton(t, m, 1) }},
+		{":seq", func(m tuiModel) tuiModel { return enter(t, typeText(t, m, ":seq 5")) }},
+		{"一時停止", func(m tuiModel) tuiModel {
+			m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyCtrlP})
+			return m
+		}},
+		{"空入力", func(m tuiModel) tuiModel { return enter(t, typeText(t, m, "   ")) }},
+	} {
+		if m := tc.do(base); m.message != "" {
+			t.Errorf("%s: message = %q, want 空", tc.name, m.message)
+		}
+	}
+
+	// 履歴の選択でもメッセージは出さない（入力欄の見出しが件数を出す）
+	m := withHistory(t, 3)
+	m = clickHistory(t, m, 1)
+	if m.message != "" {
+		t.Errorf("履歴の選択: message = %q, want 空", m.message)
+	}
+	if !strings.Contains(plainView(m), "選択中 1 件の新しい prefix>") {
+		t.Errorf("入力欄に選択件数が出ていない:\n%s", plainView(m))
+	}
+}
+
+// 画面に出るメッセージに Go のエラー文字列や内部用語を混ぜない。
+func TestMessagesAreUserFacing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		do   func() tuiModel
+	}{
+		{"使えない prefix", func() tuiModel {
+			m, _ := newTestTUI(t)
+			return enter(t, typeText(t, m, "a/b"))
+		}},
+		{"下限を超えた番号送り", func() tuiModel {
+			m, _ := newTestTUI(t)
+			m.w.SetPrefix("01")
+			return clickButton(t, m, 0)
+		}},
+		{"数字が無い prefix の番号送り", func() tuiModel {
+			m, _ := newTestTUI(t)
+			m.w.SetPrefix("case")
+			return clickButton(t, m, 0)
+		}},
+		{"コマンドの指定間違い", func() tuiModel {
+			m, _ := newTestTUI(t)
+			return enter(t, typeText(t, m, ":seq x"))
+		}},
+		{"不明なコマンド", func() tuiModel {
+			m, _ := newTestTUI(t)
+			return enter(t, typeText(t, m, ":bogus"))
+		}},
+	} {
+		m := tc.do()
+		if m.message == "" {
+			t.Errorf("%s: メッセージが空、want エラー通知", tc.name)
+			continue
+		}
+		for _, bad := range []string{"usage", "must not", "invalid", "error", "Error", "%!"} {
+			if strings.Contains(m.message, bad) {
+				t.Errorf("%s: message = %q に内部用語 %q が入っている", tc.name, m.message, bad)
+			}
+		}
 	}
 }
