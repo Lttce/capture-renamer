@@ -85,11 +85,11 @@ func TestPollRenamesNewFile(t *testing.T) {
 	w.ScanExisting()
 
 	createFile(t, dir, "shot.png")
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
+	if n := Renamed(results); n != 1 {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 	if !fileExists(dir, "test_01_shot.png") {
@@ -108,11 +108,11 @@ func TestPollSkipsKnownFiles(t *testing.T) {
 	w := NewWatcher(dir, "test")
 	w.ScanExisting()
 
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
+	if n := Renamed(results); n != 0 {
 		t.Errorf("expected 0 renames, got %d", n)
 	}
 }
@@ -128,11 +128,11 @@ func TestPrefixSwitchResetsCounter(t *testing.T) {
 
 	w.SetPrefix("b")
 	createFile(t, dir, "f2.png")
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
+	if n := Renamed(results); n != 1 {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 	if !fileExists(dir, "b_01_f2.png") {
@@ -148,11 +148,11 @@ func TestSetCounter(t *testing.T) {
 
 	w.SetCounter(50)
 	createFile(t, dir, "shot.png")
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
+	if n := Renamed(results); n != 1 {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 	if !fileExists(dir, "test_50_shot.png") {
@@ -206,12 +206,16 @@ func TestPollKeepsSequenceOnRenameFailure(t *testing.T) {
 	// t.TempDir() のクリーンアップが失敗しないよう権限を戻す
 	t.Cleanup(func() { os.Chmod(dir, 0o700) })
 
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
+	if n := Renamed(results); n != 0 {
 		t.Fatalf("expected 0 renames in a read-only dir, got %d", n)
+	}
+	// 失敗も結果に載る（Err 付き・New は空）。TUI がこれを見て赤字で出す。
+	if len(results) != 1 || results[0].Err == nil || results[0].Old != "fail.png" || results[0].New != "" {
+		t.Fatalf("expected one failed rename for fail.png, got %+v", results)
 	}
 
 	if err := os.Chmod(dir, 0o700); err != nil {
@@ -267,11 +271,11 @@ func TestPollWithCollision(t *testing.T) {
 	w.ScanExisting()
 
 	createFile(t, dir, "shot.png")
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
+	if n := Renamed(results); n != 1 {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 	if !fileExists(dir, "test_01_shot.png") {
@@ -294,11 +298,11 @@ func TestPollReturnsCounts(t *testing.T) {
 	createFile(t, dir, "b.png")
 	createFile(t, dir, "c.png")
 
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 3 {
+	if n := Renamed(results); n != 3 {
 		t.Errorf("expected 3 renames, got %d", n)
 	}
 	for _, orig := range []string{"a.png", "b.png", "c.png"} {

@@ -62,6 +62,13 @@ func (w *Watcher) getPrefix() string {
 	return w.prefix
 }
 
+// Status は表示用に現在の prefix と次に払い出す連番を返す。
+func (w *Watcher) Status() (prefix string, nextSeq int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.prefix, w.counter
+}
+
 // nextSequence は次の連番を払い出し、カウンタを進める。
 func (w *Watcher) nextSequence() int {
 	w.mu.Lock()
@@ -142,16 +149,28 @@ func (w *Watcher) ScanExisting() error {
 	return nil
 }
 
+// Rename は1件のリネーム結果。Err が非 nil なら失敗で、New は空になる。
+// 表示（TUI）とログ（-plain）の両方がこれを使う。
+type Rename struct {
+	Old string // リネーム前のファイル名
+	New string // リネーム後のファイル名
+	Err error  // リネームに失敗した理由
+}
+
 // Poll は一度フォルダをスキャンし、新ファイルをリネームする。
 // リネーム後の名前は {prefix}_{連番}_{元のファイル名}.{拡張子} 形式。
 // 既に同名ファイルが存在する場合は uniqueNewName で衝突を回避する。
-// 戻り値はリネームしたファイル数。リネーム失敗（書き込み中など）の場合は
-// 元ファイルを既知扱いにし、毎ポーリングで再試行しないようにする。
-// 失敗時は払い出した連番も差し戻すため、番号は欠けない。
-func (w *Watcher) Poll() (int, error) {
+// 戻り値は処理したファイルの一覧（成功・失敗の両方を含む）。
+// リネーム失敗（書き込み中など）の場合は元ファイルを既知扱いにし、
+// 毎ポーリングで再試行しないようにする。失敗時は払い出した連番も
+// 差し戻すため、番号は欠けない。
+//
+// 画面を壊さないため、ここではログを出さず結果を返すだけにする。
+// ログ出力は -plain モードの Start が担当する。
+func (w *Watcher) Poll() ([]Rename, error) {
 	entries, err := os.ReadDir(w.folder)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	// 既知リストになく、最終編集から1秒以上経過したファイル = 安定した新ファイル
@@ -170,7 +189,7 @@ func (w *Watcher) Poll() (int, error) {
 		newFiles = append(newFiles, e.Name())
 	}
 
-	renamed := 0
+	var results []Rename
 	for _, name := range newFiles {
 		seq := w.nextSequence()
 		oldPath := filepath.Join(w.folder, name)
@@ -182,22 +201,33 @@ func (w *Watcher) Poll() (int, error) {
 		newPath := uniqueNewName(filepath.Join(w.folder, newName))
 
 		if err := os.Rename(oldPath, newPath); err != nil {
-			log.Printf("rename failed: %s -> %s: %v", oldPath, newPath, err)
 			w.releaseSequence(seq)
 			w.markKnown(name)
+			results = append(results, Rename{Old: name, Err: err})
 			continue
 		}
 
-		log.Printf("renamed: %s -> %s", name, filepath.Base(newPath))
 		w.markKnown(name)
 		w.markKnown(filepath.Base(newPath))
-		renamed++
+		results = append(results, Rename{Old: name, New: filepath.Base(newPath)})
 	}
 
-	return renamed, nil
+	return results, nil
+}
+
+// Renamed は成功したリネームの件数を返す。
+func Renamed(results []Rename) int {
+	n := 0
+	for _, r := range results {
+		if r.Err == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // Start は interval 間隔で Poll を呼び続ける監視ループ。
+// 結果を標準ログに出すため、TUI ではなく -plain モードから使う。
 // Stop() が呼ばれるまでブロックする。
 func (w *Watcher) Start(interval time.Duration) {
 	ticker := time.NewTicker(interval)
@@ -208,8 +238,17 @@ func (w *Watcher) Start(interval time.Duration) {
 		case <-w.stop:
 			return
 		case <-ticker.C:
-			if _, err := w.Poll(); err != nil {
+			results, err := w.Poll()
+			if err != nil {
 				log.Printf("poll error: %v", err)
+				continue
+			}
+			for _, r := range results {
+				if r.Err != nil {
+					log.Printf("rename failed: %s: %v", r.Old, r.Err)
+					continue
+				}
+				log.Printf("renamed: %s -> %s", r.Old, r.New)
 			}
 		}
 	}
