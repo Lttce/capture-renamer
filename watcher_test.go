@@ -3,8 +3,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -23,10 +27,40 @@ func createFile(t *testing.T, dir, name string) {
 	}
 }
 
+// createFileAsync は createFile のサブ goroutine 版。
+// t.Fatal はテスト goroutine からしか呼べないため、失敗は t.Errorf で報告する。
+func createFileAsync(t *testing.T, dir, name string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
+		t.Errorf("write %s: %v", name, err)
+		return
+	}
+	past := time.Now().Add(-2 * time.Second)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Errorf("chtimes %s: %v", name, err)
+	}
+}
+
 // fileExists はテンポラリディレクトリ上のファイルの存在確認。
 func fileExists(dir, name string) bool {
 	_, err := os.Stat(filepath.Join(dir, name))
 	return err == nil
+}
+
+// dirNames はディレクトリ内のファイル名一覧を返す。
+// アサーション失敗時に「実際は何があったか」を出すためのヘルパー。
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 // 起動時スキャンが既存ファイルを既知リストに登録することを確認。
@@ -51,11 +85,11 @@ func TestPollRenamesNewFile(t *testing.T) {
 	w.ScanExisting()
 
 	createFile(t, dir, "shot.png")
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
+	if n := Renamed(results); n != 1 {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 	if !fileExists(dir, "test_01_shot.png") {
@@ -74,11 +108,11 @@ func TestPollSkipsKnownFiles(t *testing.T) {
 	w := NewWatcher(dir, "test")
 	w.ScanExisting()
 
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
+	if n := Renamed(results); n != 0 {
 		t.Errorf("expected 0 renames, got %d", n)
 	}
 }
@@ -94,11 +128,11 @@ func TestPrefixSwitchResetsCounter(t *testing.T) {
 
 	w.SetPrefix("b")
 	createFile(t, dir, "f2.png")
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
+	if n := Renamed(results); n != 1 {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 	if !fileExists(dir, "b_01_f2.png") {
@@ -114,15 +148,103 @@ func TestSetCounter(t *testing.T) {
 
 	w.SetCounter(50)
 	createFile(t, dir, "shot.png")
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
+	if n := Renamed(results); n != 1 {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 	if !fileExists(dir, "test_50_shot.png") {
 		t.Error("expected test_50_shot.png (counter should be 50)")
+	}
+}
+
+// releaseSequence が払い出した連番を差し戻すことを確認。
+func TestReleaseSequence(t *testing.T) {
+	w := NewWatcher(t.TempDir(), "test")
+
+	_, n := w.nextTag()
+	w.releaseSequence(n)
+
+	if _, got := w.nextTag(); got != n {
+		t.Errorf("expected released sequence %d to be reused, got %d", n, got)
+	}
+}
+
+// 払い出し後に SetCounter された場合、releaseSequence が指定値を上書きしないことを確認。
+func TestReleaseSequenceKeepsSetCounter(t *testing.T) {
+	w := NewWatcher(t.TempDir(), "test")
+
+	_, n := w.nextTag()
+	w.SetCounter(50)
+	w.releaseSequence(n)
+
+	if _, got := w.nextTag(); got != 50 {
+		t.Errorf("SetCounter(50) should win over releaseSequence, got %d", got)
+	}
+}
+
+// rename 失敗時に連番が欠番にならないことを確認。
+// 監視フォルダから書き込み権限を外して rename を失敗させる。
+func TestPollKeepsSequenceOnRenameFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod によるディレクトリ書き込み禁止が効かないためスキップ")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root はパーミッションを無視して rename に成功するためスキップ")
+	}
+
+	dir := t.TempDir()
+	w := NewWatcher(dir, "test")
+	w.ScanExisting()
+
+	createFile(t, dir, "fail.png")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	// t.TempDir() のクリーンアップが失敗しないよう権限を戻す
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	results, err := w.Poll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := Renamed(results); n != 0 {
+		t.Fatalf("expected 0 renames in a read-only dir, got %d", n)
+	}
+	// 失敗も結果に載る（Err 付き・New は空）。TUI がこれを見て赤字で出す。
+	if len(results) != 1 || results[0].Err == nil || results[0].Old != "fail.png" || results[0].New != "" {
+		t.Fatalf("expected one failed rename for fail.png, got %+v", results)
+	}
+
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	createFile(t, dir, "ok.png")
+	if _, err := w.Poll(); err != nil {
+		t.Fatal(err)
+	}
+	// 失敗した分で連番を消費していなければ 01 から始まる
+	if !fileExists(dir, "test_01_ok.png") {
+		t.Error("expected test_01_ok.png (failed rename must not consume a sequence number)")
+	}
+}
+
+// validatePrefix がパス区切り文字と空文字を弾き、通常の prefix を通すことを確認。
+func TestValidatePrefix(t *testing.T) {
+	valid := []string{"test", "test01", "項目 A", "..", "a:b*c"}
+	for _, p := range valid {
+		if err := validatePrefix(p); err != nil {
+			t.Errorf("validatePrefix(%q) should be valid, got %v", p, err)
+		}
+	}
+
+	invalid := []string{"", "../foo", "a/b", `a\b`, "/", `\`}
+	for _, p := range invalid {
+		if err := validatePrefix(p); err == nil {
+			t.Errorf("validatePrefix(%q) should be invalid, got nil", p)
+		}
 	}
 }
 
@@ -149,28 +271,20 @@ func TestPollWithCollision(t *testing.T) {
 	w.ScanExisting()
 
 	createFile(t, dir, "shot.png")
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
+	if n := Renamed(results); n != 1 {
 		t.Fatalf("expected 1 rename, got %d", n)
 	}
 	if !fileExists(dir, "test_01_shot.png") {
 		t.Error("original collision file should still exist")
 	}
 
-	// shot.png が (1) サフィックス付きでリネームされていることを確認
-	entries, _ := os.ReadDir(dir)
-	found := false
-	for _, e := range entries {
-		if e.Name() != "test_01_shot.png" && len(e.Name()) > 13 && e.Name()[:13] == "test_01_shot " {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("expected renamed file with '(1)' suffix, got:", dir)
+	// shot.png は衝突回避で (1) サフィックス付きの名前になる
+	if !fileExists(dir, "test_01_shot (1).png") {
+		t.Errorf("expected test_01_shot (1).png, got %v", dirNames(t, dir))
 	}
 }
 
@@ -184,11 +298,11 @@ func TestPollReturnsCounts(t *testing.T) {
 	createFile(t, dir, "b.png")
 	createFile(t, dir, "c.png")
 
-	n, err := w.Poll()
+	results, err := w.Poll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 3 {
+	if n := Renamed(results); n != 3 {
 		t.Errorf("expected 3 renames, got %d", n)
 	}
 	for _, orig := range []string{"a.png", "b.png", "c.png"} {
@@ -197,14 +311,329 @@ func TestPollReturnsCounts(t *testing.T) {
 		}
 	}
 
-	entries, _ := os.ReadDir(dir)
-	count := 0
-	for _, e := range entries {
-		if len(e.Name()) > 5 && e.Name()[:5] == "test_" {
-			count++
+	// os.ReadDir は名前順で返すため、a→01, b→02, c→03 と連番が決まる
+	for _, want := range []string{"test_01_a.png", "test_02_b.png", "test_03_c.png"} {
+		if !fileExists(dir, want) {
+			t.Errorf("expected %s, got %v", want, dirNames(t, dir))
 		}
 	}
-	if count != 3 {
-		t.Errorf("expected 3 renamed files, got %d", count)
+}
+
+// 本番と同じ goroutine 構成（Start のポーリング × stdin 側の SetPrefix/SetCounter）を
+// 実際に走らせ、共有状態への競合を -race で検出させる。
+// 他のテストは全て単一 goroutine で Poll を直接呼ぶため、この経路を踏むのはここだけ。
+//
+// 目的は -race による競合検出なので結果の中身は検証しないが、
+// 「1件もリネームされないまま素通りして通過した」状態を防ぐため
+// 最後にリネームが実際に起きたことだけ確認する。
+func TestConcurrentPollAndPrefixSwitch(t *testing.T) {
+	const numFiles = 100
+
+	dir := t.TempDir()
+	w := NewWatcher(dir, "test")
+	if err := w.ScanExisting(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 監視ループ。Stop 後に確実に抜けたことを待つため done で同期する。
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Start(1 * time.Millisecond)
+	}()
+
+	var wg sync.WaitGroup
+
+	// stdin 相当: prefix と連番を切り替え続ける。
+	// ポーリングと重なるよう、ファイル供給と同程度の時間をかける。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			w.SetPrefix(fmt.Sprintf("p%d", i))
+			w.SetCounter(i%50 + 1)
+			time.Sleep(100 * time.Microsecond)
+		}
+	}()
+
+	// リネーム対象を供給する（mtime は2秒前なので即座に対象になる）
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < numFiles; i++ {
+			createFileAsync(t, dir, fmt.Sprintf("f%04d.png", i))
+			time.Sleep(1 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+
+	// 供給したファイルがリネームされきるまで待つ
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && countUnrenamed(t, dir) > 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	w.Stop()
+	<-done // Poll 実行中に t.TempDir() が消えないよう待つ
+
+	if remaining := countUnrenamed(t, dir); remaining > 0 {
+		t.Errorf("%d/%d files left unrenamed after deadline", remaining, numFiles)
+	}
+	if renamed := numFiles - countUnrenamed(t, dir); renamed == 0 {
+		t.Fatal("no file was renamed; the concurrent path was never exercised")
+	}
+}
+
+// countUnrenamed は元の名前（f0000.png 形式）のままのファイル数を返す。
+// リネーム後は prefix と連番が前置されるため、先頭が "f" のものが未処理。
+func countUnrenamed(t *testing.T, dir string) int {
+	t.Helper()
+	n := 0
+	for _, name := range dirNames(t, dir) {
+		if strings.HasPrefix(name, "f") {
+			n++
+		}
+	}
+	return n
+}
+
+// reversed は Poll の結果（古い順）を履歴の並び（新しい順）にする。
+func reversed(rs []Rename) []Rename {
+	out := make([]Rename, 0, len(rs))
+	for i := len(rs) - 1; i >= 0; i-- {
+		out = append(out, rs[i])
+	}
+	return out
+}
+
+// 付け替えで連番が 1 から振り直されることを確認。
+func TestRetagRenumbersFromOne(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	createFile(t, dir, "b.png")
+	createFile(t, dir, "c.png")
+	results, err := w.Poll()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 新しい順の 2 件（c, b）だけを 02 に付け替える
+	items := reversed(results)[:2]
+	updated, renamed, errs := w.Retag(items, "02")
+	if renamed != 2 || len(errs) != 0 {
+		t.Fatalf("renamed=%d errs=%v, want 2 / なし", renamed, errs)
+	}
+	// 古い方から 01, 02 と振り直す（items は新しい順なので末尾が 01）
+	if updated[1].New != "02_01_b.png" || updated[0].New != "02_02_c.png" {
+		t.Errorf("updated = [%q %q], want [02_02_c.png 02_01_b.png]", updated[0].New, updated[1].New)
+	}
+	for _, want := range []string{"01_01_a.png", "02_01_b.png", "02_02_c.png"} {
+		if !fileExists(dir, want) {
+			t.Errorf("%s が無い: %v", want, dirNames(t, dir))
+		}
+	}
+	// 元の名前は残っていない
+	for _, gone := range []string{"01_02_b.png", "01_03_c.png"} {
+		if fileExists(dir, gone) {
+			t.Errorf("%s が残っている: %v", gone, dirNames(t, dir))
+		}
+	}
+}
+
+// 付け替えたファイルは既知扱いになり、次の Poll でリネームし直されない。
+func TestRetagMarksResultKnown(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	results, _ := w.Poll()
+	w.Retag(reversed(results), "02")
+
+	before := dirNames(t, dir)
+	again, err := w.Poll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := Renamed(again); n != 0 {
+		t.Errorf("再ポーリングで %d 件リネームされた、want 0", n)
+	}
+	if got := dirNames(t, dir); strings.Join(got, ",") != strings.Join(before, ",") {
+		t.Errorf("ファイル一覧が変わった: %v → %v", before, got)
+	}
+}
+
+// リネームに失敗していた要素（Err 付き）は付け替えの対象外。
+func TestRetagSkipsFailedEntries(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	results, _ := w.Poll()
+
+	items := append(reversed(results), Rename{Old: "locked.png", Err: fmt.Errorf("permission denied")})
+	updated, renamed, errs := w.Retag(items, "02")
+	if renamed != 1 || len(errs) != 0 {
+		t.Fatalf("renamed=%d errs=%v, want 1 / なし", renamed, errs)
+	}
+	if updated[0].New != "02_01_a.png" {
+		t.Errorf("updated[0].New = %q, want 02_01_a.png", updated[0].New)
+	}
+	if updated[1].New != "" || updated[1].Err == nil {
+		t.Errorf("失敗していた要素が書き換わった: %+v", updated[1])
+	}
+}
+
+// 付け替え先に同名ファイルがある場合は (1) を付けて衝突を避ける。
+func TestRetagWithCollision(t *testing.T) {
+	dir := t.TempDir()
+	createFile(t, dir, "02_01_a.png")
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	results, _ := w.Poll()
+
+	updated, renamed, errs := w.Retag(reversed(results), "02")
+	if renamed != 1 || len(errs) != 0 {
+		t.Fatalf("renamed=%d errs=%v, want 1 / なし", renamed, errs)
+	}
+	if updated[0].New != "02_01_a (1).png" {
+		t.Errorf("updated[0].New = %q, want 02_01_a (1).png (%v)", updated[0].New, dirNames(t, dir))
+	}
+}
+
+// ファイルが消えていた1件だけを失敗として飛ばし、残りは付け替える。
+func TestRetagReportsMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	createFile(t, dir, "b.png")
+	results, _ := w.Poll()
+	items := reversed(results)
+
+	// 古い方（a）を手で消してしまった状況
+	if err := os.Remove(filepath.Join(dir, "01_01_a.png")); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, renamed, errs := w.Retag(items, "02")
+	if renamed != 1 {
+		t.Errorf("renamed = %d, want 1", renamed)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("errs = %v, want 1件", errs)
+	}
+	// 残った b は 01 番から振られる（欠番にしない）
+	if updated[0].New != "02_01_b.png" {
+		t.Errorf("updated[0].New = %q, want 02_01_b.png", updated[0].New)
+	}
+}
+
+// 既に付けたい名前になっているファイルは、そのままで成功扱い。
+// 同じ prefix のまま連番を詰め直しても (1) が付かないことを確認。
+func TestRetagKeepsAlreadyCorrectName(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWatcher(dir, "01")
+	w.ScanExisting()
+
+	createFile(t, dir, "a.png")
+	createFile(t, dir, "b.png")
+	results, _ := w.Poll()
+
+	// 同じ 01 のまま付け直す（01_01_a, 01_02_b はどちらも既に正しい名前）
+	updated, renamed, errs := w.Retag(reversed(results), "01")
+	if renamed != 2 || len(errs) != 0 {
+		t.Fatalf("renamed=%d errs=%v, want 2 / なし", renamed, errs)
+	}
+	if updated[0].New != "01_02_b.png" || updated[1].New != "01_01_a.png" {
+		t.Errorf("updated = [%q %q], want [01_02_b.png 01_01_a.png]", updated[0].New, updated[1].New)
+	}
+	for _, got := range dirNames(t, dir) {
+		if strings.Contains(got, "(1)") {
+			t.Errorf("自分自身と衝突して (1) が付いた: %v", dirNames(t, dir))
+		}
+	}
+}
+
+// Poll と Retag を同時に走らせても、ファイルが失われないことを確認する。
+// TUI では Poll が tea.Cmd の goroutine、Retag が画面側の goroutine で動くため、
+// 同じフォルダに2つの書き手が居る（opMu で直列化している）。
+//
+// 注意: このテストは opMu を外しても通る。上書きが起きるには、2つの書き手が
+// 同じ名前を計算する必要があり（= 同じ元ファイル名が時間をおいて再登場し、
+// かつ連番も一致する）、その組み合わせをこのテストは作っていない。
+// つまり opMu は「起きうるが再現テストが書けていない」上書きへの予防で、
+// ここで見ているのは両方の経路を並行に通しても壊れないことだけ。
+func TestConcurrentPollAndRetag(t *testing.T) {
+	const batch = 30
+
+	dir := t.TempDir()
+	w := NewWatcher(dir, "01")
+	if err := w.ScanExisting(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 先に撮った分をリネームしておく（これが Retag の対象になる）
+	for i := 0; i < batch; i++ {
+		createFile(t, dir, fmt.Sprintf("a%02d.png", i))
+	}
+	first, err := w.Poll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := Renamed(first); n != batch {
+		t.Fatalf("最初の Poll で %d 件、want %d 件", n, batch)
+	}
+
+	// 撮影が続いている間に付け替える
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < batch; i++ {
+			createFileAsync(t, dir, fmt.Sprintf("b%02d.png", i))
+			if _, err := w.Poll(); err != nil {
+				t.Errorf("poll: %v", err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		w.Retag(reversed(first), "02")
+	}()
+	wg.Wait()
+
+	// 取り残しが無いよう最後にもう一度
+	if _, err := w.Poll(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2バッチ分のファイルが全部残っている（上書きで消えていない）
+	names := dirNames(t, dir)
+	if len(names) != batch*2 {
+		t.Errorf("ファイルが %d 件、want %d 件（消えた分がある）: %v", len(names), batch*2, names)
+	}
+	// 元のファイル名は1つずつ残っている
+	for i := 0; i < batch; i++ {
+		for _, orig := range []string{fmt.Sprintf("a%02d.png", i), fmt.Sprintf("b%02d.png", i)} {
+			found := 0
+			for _, n := range names {
+				if strings.HasSuffix(n, "_"+orig) {
+					found++
+				}
+			}
+			if found != 1 {
+				t.Errorf("%s を含む名前が %d 件、want 1 件", orig, found)
+			}
+		}
 	}
 }
