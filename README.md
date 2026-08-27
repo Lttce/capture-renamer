@@ -28,7 +28,7 @@ capture-renamer
 | `history` | リネームした履歴（新しい順） |
 | `● watching` / `‖ paused` | 監視中 / 一時停止中 |
 
-```
+```text
   capture-renamer    ./capture    ● watching   interval: 300ms
   prefix: [ - ] 01 [ + ]   next: 03   preview: 01_03_image.png
   prefix> _
@@ -56,7 +56,7 @@ capture-renamer
 1件ずつ選び（`▸` が付きます）、新しい prefix を入力して Enter を押すと、
 選んだ分だけ付け替わります。連番は古い順に 01 から振り直されます。
 
-```
+```text
   prefix: [ - ] 01 [ + ]   next: 06   preview: 01_06_image.png
   prefix (2 selected)> 02_
 
