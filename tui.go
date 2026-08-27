@@ -481,13 +481,13 @@ func (m tuiModel) View() string {
 	// ボタンと履歴行の当たり判定が狂うので、行数を増やす時は定数も直す。
 	lines := make([]string, 0, m.height)
 	lines = append(lines,
-		fmt.Sprintf("%s%s    %s    %s", pad, titleStyle.Render("capture-renamer"), m.folder, state),
+		fmt.Sprintf("%s%s    %s    %s   interval: %v", pad, titleStyle.Render("capture-renamer"), m.folder, state, m.interval),
 		// buttonX と桁がずれないよう、prefix 行はこの順・この隙間で組み立てる
-		// 80桁の端末でも収まるよう、項目の区切りは3スペースに詰めている
-		fmt.Sprintf("%s%s%s%s%s%s%s   next: %02d   preview: %s   interval: %v",
+		// 起動時から変わらない interval は1行目へ。ここは撮影中に変わる値だけ
+		fmt.Sprintf("%s%s%s%s%s%s%s   next: %02d   preview: %s",
 			pad, prefixLabel,
 			m.renderButton(0), gap, titleStyle.Render(prefix), gap, m.renderButton(1),
-			nextSeq, nextName(prefix, nextSeq), m.interval),
+			nextSeq, nextName(prefix, nextSeq)),
 		fmt.Sprintf("%s%s%s_", pad, m.promptLabel(), m.input),
 		msgLine(pad, msg),
 		pad+dimStyle.Render(fmt.Sprintf("history (%d)", len(m.history))),
