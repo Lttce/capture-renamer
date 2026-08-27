@@ -18,17 +18,20 @@ capture-renamer
 
 画面（TUI）が開き、監視状態とリネーム履歴が表示されます。
 
-```
-  capture-renamer    ./capture    ● 監視中
-  prefix: [ - ] 01 [ + ]     次の連番: 03    間隔: 300ms
-  新しい prefix> _
+画面の表示は英語です（`next` = 次の連番、`interval` = チェック間隔、
+`history` = リネーム履歴、`● watching` = 監視中 / `‖ paused` = 一時停止）。
 
-  履歴 (2)
+```
+  capture-renamer    ./capture    ● watching
+  prefix: [ - ] 01 [ + ]     next: 03    interval: 300ms
+  prefix> _
+
+  history (2)
     01_02_20250720_220201.jpg  ← 20250720_220201.jpg
     01_01_20250720_220101.png  ← 20250720_220101.png
 
 
-  [ - ]/[ + ] 番号送り   履歴クリックで選択 → 新 prefix + Enter   Esc 解除   Ctrl+P 停止   Ctrl+C 終了
+  [ - ]/[ + ] step   click rows, then prefix + Enter   Esc clear   Ctrl+P pause   Ctrl+C quit
 ```
 
 ### 番号送り（マウス）
@@ -47,10 +50,10 @@ capture-renamer
 選んだ分だけ付け替わります。連番は古い順に 01 から振り直されます。
 
 ```
-  prefix: [ - ] 01 [ + ]     次の連番: 06    間隔: 300ms
-  選択中 2 件の新しい prefix> 02_
+  prefix: [ - ] 01 [ + ]     next: 06    interval: 300ms
+  prefix (2 selected)> 02_
 
-  履歴 (5)
+  history (5)
     01_05_2207.png  ← 2207.png
   ▸ 01_04_2206.png  ← 2206.png      ← クリックで選択
   ▸ 01_03_2205.png  ← 2205.png      ← クリックで選択
