@@ -21,7 +21,7 @@ import (
 // View のレイアウト。行数を固定して端末が縦に揺れないようにする。
 const (
 	indent     = 2   // 左余白
-	headerRows = 6   // タイトル / prefix 行 / preview / 入力欄 / メッセージ / 履歴見出し
+	headerRows = 5   // タイトル / prefix 行 / 入力欄 / メッセージ / 履歴見出し
 	tuiFooter  = 1   // ヘルプ
 	historyMax = 500 // 保持する履歴の上限（古いものから捨てる）
 	minHeight  = 10  // WindowSizeMsg が来る前に使う仮の高さ
@@ -483,11 +483,11 @@ func (m tuiModel) View() string {
 	lines = append(lines,
 		fmt.Sprintf("%s%s    %s    %s", pad, titleStyle.Render("capture-renamer"), m.folder, state),
 		// buttonX と桁がずれないよう、prefix 行はこの順・この隙間で組み立てる
-		fmt.Sprintf("%s%s%s%s%s%s%s     next: %02d    interval: %v",
+		// 80桁の端末でも収まるよう、項目の区切りは3スペースに詰めている
+		fmt.Sprintf("%s%s%s%s%s%s%s   next: %02d   preview: %s   interval: %v",
 			pad, prefixLabel,
 			m.renderButton(0), gap, titleStyle.Render(prefix), gap, m.renderButton(1),
-			nextSeq, m.interval),
-		fmt.Sprintf("%spreview: %s", pad, nextName(prefix, nextSeq)),
+			nextSeq, nextName(prefix, nextSeq), m.interval),
 		fmt.Sprintf("%s%s%s_", pad, m.promptLabel(), m.input),
 		msgLine(pad, msg),
 		pad+dimStyle.Render(fmt.Sprintf("history (%d)", len(m.history))),
