@@ -16,9 +16,36 @@
 
 capture-renamer
 
-起動中に新しい文字列を入力して Enter を押すと、連番がリセットされて切り替わります。
+画面（TUI）が開き、監視状態とリネーム履歴が表示されます。
+
+```
+  capture-renamer    ./capture    ● 監視中
+  prefix: test01     次の連番: 03    間隔: 300ms
+
+  履歴 (2)
+    test01_02_20250720_220201.jpg  ← 20250720_220201.jpg
+    test01_01_20250720_220101.png  ← 20250720_220101.png
+
+
+  新しい prefix> test0_
+  Enter 確定   :seq N 連番指定   Ctrl+U 消去   Ctrl+P 一時停止   Ctrl+C 終了
+```
+
+新しい文字列を入力して Enter を押すと、連番がリセットされて切り替わります。
 
 先頭の文字列に `/` と `\` は使えません（ファイル名ではなくパスとして扱われてしまうため）。
+
+### キー操作
+
+| キー | 動作 |
+|---|---|
+| 文字入力 + Enter | prefix を切り替える（連番は1にリセット） |
+| `:seq N` + Enter | 連番を N に設定する（prefix は変えない） |
+| Ctrl+U | 入力中の文字を消す |
+| Ctrl+P | 監視を一時停止 / 再開 |
+| Ctrl+C | 終了 |
+
+一時停止中に作られたファイルは、再開後のポーリングでまとめてリネームされます。
 
 ## オプション
 
@@ -27,9 +54,17 @@ capture-renamer
 | -folder | . | 監視するフォルダ |
 | -prefix | test | ファイル名の先頭に入る文字列 |
 | -interval | 300 | チェック間隔(ms、100以上) |
+| -plain | false | 画面を使わず、標準入力とログ出力で動かす |
+
+`-plain` は画面を持たないモードです。パイプ越しに動かしたい場合や、
+TUI が使えない端末ではこちらを使ってください。操作は従来どおり、
+標準入力に新しい prefix か `:seq N` を打って Enter です。
 
 ## ビルド
 
 go build -o bin/capture-renamer.exe .
 
 ファイル1つで動きます。インストール不要。
+
+画面描画に [Bubble Tea](https://github.com/charmbracelet/bubbletea) と
+[Lip Gloss](https://github.com/charmbracelet/lipgloss) を使っています。
