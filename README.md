@@ -29,8 +29,8 @@ capture-renamer
 | `● watching` / `‖ paused` | 監視中 / 一時停止中 |
 
 ```
-  capture-renamer    ./capture    ● watching
-  prefix: [ - ] 01 [ + ]   next: 03   preview: 01_03_image.png   interval: 300ms
+  capture-renamer    ./capture    ● watching   interval: 300ms
+  prefix: [ - ] 01 [ + ]   next: 03   preview: 01_03_image.png
   prefix> _
 
   history (2)
@@ -57,7 +57,7 @@ capture-renamer
 選んだ分だけ付け替わります。連番は古い順に 01 から振り直されます。
 
 ```
-  prefix: [ - ] 01 [ + ]   next: 06   preview: 01_06_image.png   interval: 300ms
+  prefix: [ - ] 01 [ + ]   next: 06   preview: 01_06_image.png
   prefix (2 selected)> 02_
 
   history (5)
