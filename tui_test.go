@@ -266,14 +266,14 @@ func TestViewShowsStatus(t *testing.T) {
 	m.w.SetPrefix("shot")
 	m.w.SetCounter(3)
 	view := plainView(m)
-	for _, want := range []string{"capture-renamer", dir, "shot", "次の連番: 03", "監視中", "10ms"} {
+	for _, want := range []string{"capture-renamer", dir, "shot", "next: 03", "watching", "10ms"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("View should contain %q:\n%s", want, view)
 		}
 	}
 	paused, _ := update(t, m, tea.KeyMsg{Type: tea.KeyCtrlP})
-	if !strings.Contains(plainView(paused), "一時停止") {
-		t.Errorf("paused View should say 一時停止:\n%s", plainView(paused))
+	if !strings.Contains(plainView(paused), "paused") {
+		t.Errorf("paused View should say paused:\n%s", plainView(paused))
 	}
 }
 
@@ -533,7 +533,7 @@ func TestViewFitsTerminalHeight(t *testing.T) {
 				t.Errorf("height=%d entries=%d: View は %d 行、want %d 行", height, entries, got, height)
 			}
 			// フレームが収まる高さでは、最後の行はヘルプ行（末尾に余計な改行が無い）
-			if height >= 9 && !strings.Contains(lastLine(plainView(m)), "Ctrl+C 終了") {
+			if height >= 9 && !strings.Contains(lastLine(plainView(m)), "Ctrl+C quit") {
 				t.Errorf("height=%d entries=%d: 最終行 = %q, want ヘルプ行", height, entries, lastLine(plainView(m)))
 			}
 		}
@@ -608,7 +608,7 @@ func TestClickTogglesRowSelection(t *testing.T) {
 	if got := m.selectedIndexes(); len(got) != 2 || got[0] != 2 || got[1] != 4 {
 		t.Fatalf("selectedIndexes = %v, want [2 4]", got)
 	}
-	if !strings.Contains(plainView(m), "選択中 2 件の新しい prefix>") {
+	if !strings.Contains(plainView(m), "prefix (2 selected)>") {
 		t.Errorf("入力欄が付け替えモードになっていない:\n%s", plainView(m))
 	}
 
@@ -636,7 +636,7 @@ func TestEscClearsSelection(t *testing.T) {
 	if m.selectedCount() != 0 || m.message != "" {
 		t.Errorf("selectedCount=%d message=%q, want 0 / 空", m.selectedCount(), m.message)
 	}
-	if !strings.Contains(plainView(m), "新しい prefix>") || strings.Contains(plainView(m), "選択中") {
+	if !strings.Contains(plainView(m), "prefix>") || strings.Contains(plainView(m), "selected") {
 		t.Errorf("入力欄が通常に戻っていない:\n%s", plainView(m))
 	}
 }
@@ -674,7 +674,7 @@ func TestRetagFlowRenamesFilesAndSwitchesPrefix(t *testing.T) {
 	if prefix != "02" || next != 3 {
 		t.Errorf("prefix=%q next=%d, want 02 / 3", prefix, next)
 	}
-	if m.isErr || !strings.Contains(m.message, "2 件") {
+	if m.isErr || !strings.Contains(m.message, "renamed 2") {
 		t.Errorf("message = %q (isErr=%v), want 2件付け替えた通知", m.message, m.isErr)
 	}
 
@@ -706,7 +706,7 @@ func TestRetagMiddleKeepsCurrentPrefix(t *testing.T) {
 	if prefix != "01" || next != 4 {
 		t.Errorf("prefix=%q next=%d, want 01 / 4（撮影中の prefix は据え置き）", prefix, next)
 	}
-	if !strings.Contains(m.message, "1 件") {
+	if !strings.Contains(m.message, "renamed 1") {
 		t.Errorf("message = %q, want 付け替えた件数の通知", m.message)
 	}
 }
@@ -856,7 +856,7 @@ func TestSuccessfulActionsStayQuiet(t *testing.T) {
 	if m.message != "" {
 		t.Errorf("履歴の選択: message = %q, want 空", m.message)
 	}
-	if !strings.Contains(plainView(m), "選択中 1 件の新しい prefix>") {
+	if !strings.Contains(plainView(m), "prefix (1 selected)>") {
 		t.Errorf("入力欄に選択件数が出ていない:\n%s", plainView(m))
 	}
 }

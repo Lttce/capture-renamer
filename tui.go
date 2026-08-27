@@ -83,18 +83,18 @@ func bumpPrefix(p string, delta int) (string, error) {
 
 	if digits == "" {
 		if delta < 0 {
-			return "", fmt.Errorf("末尾に数字が無いので減らせません")
+			return "", fmt.Errorf("no trailing number to decrease")
 		}
 		return p + "01", nil
 	}
 
 	n, err := strconv.Atoi(digits)
 	if err != nil {
-		return "", fmt.Errorf("数字が大きすぎます")
+		return "", fmt.Errorf("number is too large")
 	}
 	n += delta
 	if n < 1 {
-		return "", fmt.Errorf("これ以上減らせません")
+		return "", fmt.Errorf("cannot go below 1")
 	}
 	return fmt.Sprintf("%s%0*d", stem, len(digits), n), nil
 }
@@ -244,7 +244,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pollMsg:
 		m.polling = false
 		if msg.err != nil {
-			m.message, m.isErr = fmt.Sprintf("監視エラー: %v", msg.err), true
+			m.message, m.isErr = fmt.Sprintf("cannot read folder: %v", msg.err), true
 			return m, nil
 		}
 		// 新しいものが上に来るよう、今回の結果を反転して履歴の先頭に積む
@@ -348,7 +348,7 @@ func (m tuiModel) applyInput() tuiModel {
 
 	if err := validatePrefix(input); err != nil {
 		// validatePrefix の文面は -plain 用の英語なので、画面には出さない
-		m.message, m.isErr = "prefix に / と \\ は使えません", true
+		m.message, m.isErr = "prefix cannot contain / or \\", true
 		return m
 	}
 
@@ -385,13 +385,13 @@ func (m tuiModel) retag(prefix string) tuiModel {
 	// 付け替えた件数は他に出る場所が無いので伝える。prefix と連番はヘッダを見れば分かる。
 	switch {
 	case renamed > 0 && len(failed) > 0:
-		m.message, m.isErr = fmt.Sprintf("%d 件を %s に付け替えました（%d 件失敗: %s）", renamed, prefix, len(failed), failed[0]), true
+		m.message, m.isErr = fmt.Sprintf("renamed %d to %s (%d failed: %s)", renamed, prefix, len(failed), failed[0]), true
 	case renamed > 0:
-		m.message, m.isErr = fmt.Sprintf("%d 件を %s に付け替えました", renamed, prefix), false
+		m.message, m.isErr = fmt.Sprintf("renamed %d to %s", renamed, prefix), false
 	case len(failed) > 0:
-		m.message, m.isErr = fmt.Sprintf("付け替えられませんでした（%s）", failed[0]), true
+		m.message, m.isErr = fmt.Sprintf("could not rename %s", failed[0]), true
 	default:
-		m.message, m.isErr = "付け替える対象がありませんでした", true
+		m.message, m.isErr = "nothing to rename", true
 	}
 
 	// 選択に最新が含まれていた時だけ、これからの撮影もその prefix にする
@@ -406,24 +406,24 @@ func (m tuiModel) retag(prefix string) tuiModel {
 func (m tuiModel) runCommand(parts []string) tuiModel {
 	m.isErr = true
 	if len(parts) == 0 {
-		m.message = "使えるコマンド: :seq N"
+		m.message = "commands: :seq N"
 		return m
 	}
 	switch parts[0] {
 	case "seq":
 		if len(parts) != 2 {
-			m.message = ":seq 5 のように連番を1つ指定してください"
+			m.message = ":seq takes one number, e.g. :seq 5"
 			return m
 		}
 		n, err := strconv.Atoi(parts[1])
 		if err != nil || n < 1 {
-			m.message = "連番は 1 以上の数字で指定してください"
+			m.message = "next must be 1 or more"
 			return m
 		}
 		m.w.SetCounter(n)
 		m.message, m.isErr = "", false // 連番はヘッダに出る
 	default:
-		m.message = "使えるコマンド: :seq N"
+		m.message = "commands: :seq N"
 	}
 	return m
 }
@@ -431,7 +431,7 @@ func (m tuiModel) runCommand(parts []string) tuiModel {
 // renameLine は履歴1行分の表示。失敗した分は理由を出す。
 func renameLine(r Rename) string {
 	if r.Err != nil {
-		return errStyle.Render(fmt.Sprintf("✗ %s  リネーム失敗: %v", r.Old, r.Err))
+		return errStyle.Render(fmt.Sprintf("✗ %s  rename failed: %v", r.Old, r.Err))
 	}
 	return fmt.Sprintf("%s  %s", r.New, dimStyle.Render("← "+r.Old))
 }
@@ -447,17 +447,17 @@ func (m tuiModel) renderButton(i int) string {
 // promptLabel は入力欄の見出し。履歴を選択中は付け替えだと分かるようにする。
 func (m tuiModel) promptLabel() string {
 	if n := m.selectedCount(); n > 0 {
-		return fmt.Sprintf("選択中 %d 件の新しい prefix> ", n)
+		return fmt.Sprintf("prefix (%d selected)> ", n)
 	}
-	return "新しい prefix> "
+	return "prefix> "
 }
 
 func (m tuiModel) View() string {
 	pad := strings.Repeat(" ", indent)
 
-	state := okStyle.Render("● 監視中")
+	state := okStyle.Render("● watching")
 	if m.paused {
-		state = pausedStyle.Render("‖ 一時停止")
+		state = pausedStyle.Render("‖ paused")
 	}
 	prefix, nextSeq := m.w.Status()
 	gap := strings.Repeat(" ", buttonGap)
@@ -473,13 +473,13 @@ func (m tuiModel) View() string {
 	lines = append(lines,
 		fmt.Sprintf("%s%s    %s    %s", pad, titleStyle.Render("capture-renamer"), m.folder, state),
 		// buttonX と桁がずれないよう、prefix 行はこの順・この隙間で組み立てる
-		fmt.Sprintf("%s%s%s%s%s%s%s     次の連番: %02d    間隔: %v",
+		fmt.Sprintf("%s%s%s%s%s%s%s     next: %02d    interval: %v",
 			pad, prefixLabel,
 			m.renderButton(0), gap, titleStyle.Render(prefix), gap, m.renderButton(1),
 			nextSeq, m.interval),
 		fmt.Sprintf("%s%s%s_", pad, m.promptLabel(), m.input),
 		msgLine(pad, msg),
-		pad+dimStyle.Render(fmt.Sprintf("履歴 (%d)", len(m.history))),
+		pad+dimStyle.Render(fmt.Sprintf("history (%d)", len(m.history))),
 	)
 
 	for i := 0; i < m.historyRows(); i++ {
@@ -494,7 +494,7 @@ func (m tuiModel) View() string {
 		lines = append(lines, pad+marker+renameLine(m.history[i].Rename))
 	}
 
-	lines = append(lines, pad+dimStyle.Render("[ - ]/[ + ] 番号送り   履歴クリックで選択 → 新 prefix + Enter   Esc 解除   Ctrl+P 停止   Ctrl+C 終了"))
+	lines = append(lines, pad+dimStyle.Render("[ - ]/[ + ] step   click rows, then prefix + Enter   Esc clear   Ctrl+P pause   Ctrl+C quit"))
 
 	// 端末より高いフレームを返すと Bubble Tea が「上から」行を捨てるため
 	// (standard_renderer.go の flush)、全部の行番号が上にずれてボタンの当たり判定が
