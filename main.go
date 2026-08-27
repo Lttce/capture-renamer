@@ -1,9 +1,8 @@
-// エントリポイント。Watcher の初期化と stdin ループのみ。
+// エントリポイント。Watcher を初期化し、TUI か -plain のどちらかで動かす。
 // 処理の流れ:
-//   1. Watcher を初期化し、起動時に既存ファイルをスキャン
-//   2. ウォッチャーを別 goroutine で起動（ポーリング監視）
-//   3. メイン goroutine で stdin 入力を受け付け、prefix 切替
-//   4. Ctrl+C または stdin 終了で停止
+//  1. flag をパースし、Watcher を初期化して既存ファイルをスキャン
+//  2. 既定では TUI（tui.go）を起動
+//  3. -plain なら従来どおり別 goroutine の監視ループ + stdin 入力
 package main
 
 import (
@@ -22,6 +21,7 @@ func main() {
 	folder := flag.String("folder", ".", "監視フォルダのパス")
 	prefix := flag.String("prefix", "test", "初期prefix")
 	interval := flag.Int("interval", 300, "ポーリング間隔(ms)")
+	plain := flag.Bool("plain", false, "TUI を使わず、stdin 入力 + ログ出力で動かす")
 	flag.Parse()
 
 	// 100ms未満のポーリング間隔はビジーループ相当の負荷になるため禁止
@@ -41,15 +41,28 @@ func main() {
 	}
 
 	dur := time.Duration(*interval) * time.Millisecond
-	fmt.Printf("Monitoring %s (prefix=%q, interval=%v)\n", *folder, *prefix, dur)
+
+	if *plain {
+		runPlain(w, *folder, *prefix, dur)
+		return
+	}
+	if err := runTUI(w, *folder, dur); err != nil {
+		log.Fatalf("tui: %v", err)
+	}
+}
+
+// runPlain は TUI を使わない従来モード。
+// 監視ループを別 goroutine で回し、メイン側で stdin の入力を受け付ける。
+// Ctrl+C または stdin 終了で停止する。
+func runPlain(w *Watcher, folder, prefix string, interval time.Duration) {
+	fmt.Printf("Monitoring %s (prefix=%q, interval=%v)\n", folder, prefix, interval)
 	fmt.Println("Enter new prefix to switch, or :seq N to set counter. Ctrl+C to exit")
 
 	// Ctrl+C のハンドリング
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
 
-	// Watcher を別 goroutine で起動（ポーリング監視ループ）
-	go w.Start(dur)
+	go w.Start(interval)
 
 	// stdin から入力を受け付ける goroutine
 	// コマンドは map でディスパッチ。新しいコマンドはここにハンドラを追加する。
