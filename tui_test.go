@@ -595,54 +595,60 @@ func TestHistoryRowAt(t *testing.T) {
 	}
 }
 
-func TestClickSelectsRangeToNewest(t *testing.T) {
+// 履歴の行はクリックするたびに1件ずつ選択・解除できる。
+func TestClickTogglesRowSelection(t *testing.T) {
 	m := withHistory(t, 5)
+
 	m = clickHistory(t, m, 2)
-	if m.selected != 2 || m.selectedCount() != 3 {
-		t.Fatalf("selected=%d count=%d, want 2 / 3", m.selected, m.selectedCount())
+	m = clickHistory(t, m, 4)
+	if got := m.selectedIndexes(); len(got) != 2 || got[0] != 2 || got[1] != 4 {
+		t.Fatalf("selectedIndexes = %v, want [2 4]", got)
 	}
-	if !strings.Contains(plainView(m), "選択中 3 件の新しい prefix>") {
+	if !strings.Contains(plainView(m), "選択中 2 件の新しい prefix>") {
 		t.Errorf("入力欄が付け替えモードになっていない:\n%s", plainView(m))
 	}
-	// 選択範囲だけにマーカーが付く
+
+	// 選んだ行だけにマーカーが付く（範囲ではない）
 	lines := strings.Split(plainView(m), "\n")
 	for i := 0; i < 5; i++ {
 		marked := strings.Contains(lines[historyTop+i], "▸")
-		if want := i <= 2; marked != want {
+		if want := i == 2 || i == 4; marked != want {
 			t.Errorf("履歴 %d 行目のマーカー = %v, want %v (%q)", i, marked, want, lines[historyTop+i])
 		}
 	}
-	// 同じ行をもう一度押すと解除
+
+	// もう一度押すとその行だけ外れる
 	m = clickHistory(t, m, 2)
-	if m.selected != -1 {
-		t.Errorf("selected = %d, want -1", m.selected)
+	if got := m.selectedIndexes(); len(got) != 1 || got[0] != 4 {
+		t.Errorf("selectedIndexes = %v, want [4]", got)
 	}
 }
 
 func TestEscClearsSelection(t *testing.T) {
 	m := withHistory(t, 3)
 	m = clickHistory(t, m, 1)
+	m = clickHistory(t, m, 2)
 	m, _ = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
-	if m.selected != -1 || m.message != "" {
-		t.Errorf("selected=%d message=%q, want -1 / 空", m.selected, m.message)
+	if m.selectedCount() != 0 || m.message != "" {
+		t.Errorf("selectedCount=%d message=%q, want 0 / 空", m.selectedCount(), m.message)
 	}
 	if !strings.Contains(plainView(m), "新しい prefix>") || strings.Contains(plainView(m), "選択中") {
 		t.Errorf("入力欄が通常に戻っていない:\n%s", plainView(m))
 	}
 }
 
-// 履歴を選んで新しい prefix を入れると、実ファイルが付け替わり、
-// これからの撮影もその prefix になる。
+// 履歴を選んで新しい prefix を入れると実ファイルが付け替わる。
+// 最新の1件を含む選択なので、これからの撮影もその prefix になる。
 func TestRetagFlowRenamesFilesAndSwitchesPrefix(t *testing.T) {
 	m, dir := newTestTUI(t)
 	m.w.SetPrefix("01")
 	for _, name := range []string{"a.png", "b.png", "c.png"} {
 		createFile(t, dir, name)
 	}
-	msg := pollCmd(m.w)().(pollMsg)
-	m, _ = update(t, m, msg)
+	m, _ = update(t, m, pollCmd(m.w)().(pollMsg))
 
-	// 新しい順に c, b, a。b（index 1）から最新までを 02 にする
+	// 新しい順に c, b, a。c と b を選んで 02 にする
+	m = clickHistory(t, m, 0)
 	m = clickHistory(t, m, 1)
 	m = enter(t, typeText(t, m, "02"))
 
@@ -651,17 +657,15 @@ func TestRetagFlowRenamesFilesAndSwitchesPrefix(t *testing.T) {
 			t.Errorf("%s が無い: %v", want, dirNames(t, dir))
 		}
 	}
-	if m.selected != -1 {
-		t.Errorf("selected = %d, want -1（付け替え後は解除）", m.selected)
+	if m.selectedCount() != 0 {
+		t.Errorf("selectedCount = %d, want 0（付け替え後は解除）", m.selectedCount())
 	}
-	// 履歴の表示も新しい名前になる
 	view := plainView(m)
 	for _, want := range []string{"02_02_c.png", "02_01_b.png", "01_01_a.png"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("履歴に %s が出ていない:\n%s", want, view)
 		}
 	}
-	// これからの撮影は 02 の続きから
 	prefix, next := m.w.Status()
 	if prefix != "02" || next != 3 {
 		t.Errorf("prefix=%q next=%d, want 02 / 3", prefix, next)
@@ -678,12 +682,72 @@ func TestRetagFlowRenamesFilesAndSwitchesPrefix(t *testing.T) {
 	}
 }
 
+// 途中だけを付け替えた場合、撮影中の prefix は動かさない。
+func TestRetagMiddleKeepsCurrentPrefix(t *testing.T) {
+	m, dir := newTestTUI(t)
+	m.w.SetPrefix("01")
+	for _, name := range []string{"a.png", "b.png", "c.png"} {
+		createFile(t, dir, name)
+	}
+	m, _ = update(t, m, pollCmd(m.w)().(pollMsg))
+
+	// 真ん中の b（新しい順で index 1）だけを 02 にする
+	m = clickHistory(t, m, 1)
+	m = enter(t, typeText(t, m, "02"))
+
+	if !fileExists(dir, "02_01_b.png") {
+		t.Errorf("02_01_b.png が無い: %v", dirNames(t, dir))
+	}
+	prefix, next := m.w.Status()
+	if prefix != "01" || next != 4 {
+		t.Errorf("prefix=%q next=%d, want 01 / 4（撮影中の prefix は据え置き）", prefix, next)
+	}
+	if !strings.Contains(m.message, "のまま") {
+		t.Errorf("message = %q, want 撮影中の prefix が変わらない旨の通知", m.message)
+	}
+}
+
+// 変え忘れが2回あった場合を、選択2回で直せる。
+func TestRetagTwoForgottenBatches(t *testing.T) {
+	m, dir := newTestTUI(t)
+	m.w.SetPrefix("01")
+	// 01 のつもりの2枚、02 のはずの2枚、03 のはずの1枚が全部 01 で撮れてしまった
+	for _, name := range []string{"a.png", "b.png", "c.png", "d.png", "e.png"} {
+		createFile(t, dir, name)
+	}
+	m, _ = update(t, m, pollCmd(m.w)().(pollMsg))
+
+	// 新しい順に e, d, c, b, a。まず c と d（index 2,1）を 02 へ
+	m = clickHistory(t, m, 1)
+	m = clickHistory(t, m, 2)
+	m = enter(t, typeText(t, m, "02"))
+	// 次に e（index 0）を 03 へ
+	m = clickHistory(t, m, 0)
+	m = enter(t, typeText(t, m, "03"))
+
+	for _, want := range []string{"01_01_a.png", "01_02_b.png", "02_01_c.png", "02_02_d.png", "03_01_e.png"} {
+		if !fileExists(dir, want) {
+			t.Errorf("%s が無い: %v", want, dirNames(t, dir))
+		}
+	}
+	// 最後の付け替えは最新を含むので、撮影中の prefix は 03 の続き
+	prefix, next := m.w.Status()
+	if prefix != "03" || next != 2 {
+		t.Errorf("prefix=%q next=%d, want 03 / 2", prefix, next)
+	}
+	createFile(t, dir, "f.png")
+	m, _ = update(t, m, pollCmd(m.w)().(pollMsg))
+	if !fileExists(dir, "03_02_f.png") {
+		t.Errorf("03_02_f.png が無い: %v", dirNames(t, dir))
+	}
+}
+
 func TestRetagRejectsInvalidPrefix(t *testing.T) {
 	m := withHistory(t, 3)
 	m = clickHistory(t, m, 1)
 	m = enter(t, typeText(t, m, "a/b"))
-	if m.selected != 1 {
-		t.Errorf("selected = %d, want 1（不正な入力で選択は解除しない）", m.selected)
+	if m.selectedCount() != 1 {
+		t.Errorf("selectedCount = %d, want 1（不正な入力で選択は解除しない）", m.selectedCount())
 	}
 	if !m.isErr {
 		t.Errorf("message = %q, want エラー", m.message)
@@ -698,8 +762,8 @@ func TestCommandsWorkWhileSelected(t *testing.T) {
 	if _, next := m.w.Status(); next != 7 {
 		t.Errorf("next seq = %d, want 7", next)
 	}
-	if m.selected != 1 {
-		t.Errorf("selected = %d, want 1（コマンドでは選択を解除しない）", m.selected)
+	if m.selectedCount() != 1 {
+		t.Errorf("selectedCount = %d, want 1（コマンドでは選択を解除しない）", m.selectedCount())
 	}
 }
 
@@ -714,31 +778,32 @@ func TestViewHeightWithSelection(t *testing.T) {
 	}
 }
 
-// 選択中に新しいファイルが来ても、選択の一番古い側が外れない。
-// 選択は「この行から最新まで」なので、新着はそのまま範囲に入る。
-func TestSelectionSurvivesNewArrivals(t *testing.T) {
+// 選択中に新しいファイルが来ても、選んだ行はそのまま選ばれ続ける
+// （選択状態を履歴の行そのものが持っているため、位置がずれない）。
+func TestSelectionFollowsRowsOnNewArrivals(t *testing.T) {
 	m := withHistory(t, 3) // 新しい順に a2, a1, a0
 	m = clickHistory(t, m, 1)
-	oldest := m.history[m.selected]
+	picked := m.history[1].Rename
 
 	m, _ = update(t, m, pollMsg{results: []Rename{
 		{Old: "b0.png", New: "01_04_b0.png"},
 		{Old: "b1.png", New: "01_05_b1.png"},
 	}})
 
-	if got := m.history[m.selected]; got != oldest {
-		t.Errorf("選択の一番古い側 = %+v, want %+v", got, oldest)
+	idx := m.selectedIndexes()
+	if len(idx) != 1 {
+		t.Fatalf("selectedIndexes = %v, want 1件（新着は選択に入らない）", idx)
 	}
-	if m.selectedCount() != 4 {
-		t.Errorf("selectedCount = %d, want 4（元の2件 + 新着2件）", m.selectedCount())
+	if got := m.history[idx[0]].Rename; got != picked {
+		t.Errorf("選択中の行 = %+v, want %+v", got, picked)
 	}
-	if m.history[0].New != "01_05_b1.png" {
-		t.Fatalf("history[0] = %q, want 新着", m.history[0].New)
+	if m.history[0].New != "01_05_b1.png" || m.history[0].sel {
+		t.Errorf("history[0] = %+v, want 新着で未選択", m.history[0])
 	}
 }
 
-// 履歴が上限で切り詰められても選択が範囲外を指さない。
-func TestSelectionStaysInRangeWhenHistoryIsCapped(t *testing.T) {
+// 選択した行が履歴の上限からあふれても壊れない。
+func TestSelectionDroppedWhenHistoryIsCapped(t *testing.T) {
 	m := withHistory(t, 3)
 	m = clickHistory(t, m, 2)
 
@@ -748,10 +813,9 @@ func TestSelectionStaysInRangeWhenHistoryIsCapped(t *testing.T) {
 	}
 	m, _ = update(t, m, pollMsg{results: results})
 
-	if m.selected > len(m.history)-1 {
-		t.Errorf("selected = %d, history = %d 件（範囲外）", m.selected, len(m.history))
+	if m.selectedCount() != 0 {
+		t.Errorf("selectedCount = %d, want 0（あふれた行の選択は消える）", m.selectedCount())
 	}
-	// 範囲外を指していなければ View も落ちない
 	if got := len(strings.Split(m.View(), "\n")); got != m.height {
 		t.Errorf("View は %d 行、want %d 行", got, m.height)
 	}
